@@ -1,0 +1,3 @@
+-r platform/requirements.txt
+-r ai/requirements.txt
+-r mocks/requirements.txt

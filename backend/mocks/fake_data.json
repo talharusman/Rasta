@@ -1,0 +1,12 @@
+[
+  {"cnic": "99999-0000001-1", "name": "Test Person One",   "phone": "0300-0000001", "note": "FAKE PERSON"},
+  {"cnic": "99999-0000002-2", "name": "Test Person Two",   "phone": "0300-0000002", "note": "FAKE PERSON"},
+  {"cnic": "99999-0000003-3", "name": "Test Person Three", "phone": "0300-0000003", "note": "FAKE PERSON"},
+  {"cnic": "99999-0000004-4", "name": "Test Person Four",  "phone": "0300-0000004", "note": "FAKE PERSON"},
+  {"cnic": "99999-0000005-5", "name": "Test Person Five",  "phone": "0300-0000005", "note": "FAKE PERSON"},
+  {"cnic": "99999-0000006-6", "name": "Test Person Six",   "phone": "0300-0000006", "note": "FAKE PERSON"},
+  {"cnic": "99999-0000007-7", "name": "Test Person Seven", "phone": "0300-0000007", "note": "FAKE PERSON"},
+  {"cnic": "99999-0000008-8", "name": "Test Person Eight", "phone": "0300-0000008", "note": "FAKE PERSON"},
+  {"cnic": "99999-0000009-9", "name": "Test Person Nine",  "phone": "0300-0000009", "note": "FAKE PERSON"},
+  {"cnic": "99999-0000010-0", "name": "Test Person Ten",   "phone": "0300-0000010", "note": "FAKE PERSON"}
+]
