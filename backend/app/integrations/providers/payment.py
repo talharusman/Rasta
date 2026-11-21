@@ -263,6 +263,7 @@ class MockRaastPaymentProvider:
             row = await _db(_db_get, case_id)
             if row is None:
                 return PaymentResult(status=PaymentStatus.failed, idempotency_key=key,
+                                     no_transaction_found=True,
                                      error="no payment request exists for this case")
             if row.status == "success":
                 return _from_row(row)
@@ -271,7 +272,7 @@ class MockRaastPaymentProvider:
                 return result  # found or unavailable
             await _db(_db_update, case_id, status="failed", last_error="no transaction at provider for this key")
             return PaymentResult(
-                status=PaymentStatus.failed, idempotency_key=key,
+                status=PaymentStatus.failed, idempotency_key=key, no_transaction_found=True,
                 error="no transaction found at the provider for this key; disburse can be called again (idempotent)")
         except Exception as exc:
             return PaymentResult(status=PaymentStatus.unavailable, idempotency_key=key, reconcile_required=True,

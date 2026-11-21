@@ -73,6 +73,9 @@ STUB_NOTIFICATIONS: List[Dict[str, Any]] = []
 # so the stub helpers and the agent agree).
 DEFAULT_RULES = {
     "version": "rules-v1",
+    # TODO(M1): where the payout amount really lives (case field or active rules).
+    # The disbursement job reads case["approved_amount"] / case["amount"] first, then this.
+    "payout_amount": 25000,
     "rules": [{"id": "income_cap", "field": "monthly_income", "op": "lte", "value": 50000}],
 }
 
@@ -226,12 +229,32 @@ def log_audit(
     logger.info("AUDIT (stub) %s", entry)
 
 
-def create_notification(case_id: str, recipient: str, message: str) -> None:
+def create_notification(case_id: str, recipient: str, message: str) -> Optional[str]:
+    """Returns the notification id (None if Member 1's function returns nothing)."""
     fn = _real("create_notification")
     if fn:
         return fn(case_id, recipient, message)
     with _LOCK:
-        STUB_NOTIFICATIONS.append({"case_id": case_id, "recipient": recipient, "message": message})
+        notification_id = f"notif-{len(STUB_NOTIFICATIONS) + 1}"
+        STUB_NOTIFICATIONS.append({"id": notification_id, "case_id": case_id, "recipient": recipient,
+                                   "message": message, "state": "created", "message_id": None})
+    return notification_id
+
+
+def update_notification_state(notification_id: str, state: str, message_id: Optional[str] = None) -> None:
+    """state: created | sent | delivered | resent | failed.
+    TODO(M1): add this to the notifications module (keep name and signature)."""
+    fn = _real("update_notification_state")
+    if fn:
+        return fn(notification_id, state, message_id)
+    with _LOCK:
+        for item in STUB_NOTIFICATIONS:
+            if item.get("id") == notification_id:
+                item["state"] = state
+                if message_id is not None:
+                    item["message_id"] = message_id
+                return
+    raise KeyError(f"notification not found: {notification_id}")
 
 
 # ---------------------------------------------------------------------------

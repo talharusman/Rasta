@@ -75,6 +75,9 @@ class PaymentResult(BaseModel):
     # True when the outcome at the payment provider is not known yet; call
     # reconcile_unknown(case_id) (never a blind second payment).
     reconcile_required: bool = False
+    # reconcile_unknown only: the provider was reached and has NO transaction for
+    # this idempotency key, so it is safe to call disburse again with the same key.
+    no_transaction_found: bool = False
     latency_ms: int = 0
     error: Optional[str] = None
 
