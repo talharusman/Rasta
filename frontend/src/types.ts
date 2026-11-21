@@ -9,6 +9,7 @@ export interface AuthUser {
   cnic?: string;
   phone?: string;
   avatarInitials: string;
+  citizen_id?: string | null;
 }
 
 export interface AuthResult {

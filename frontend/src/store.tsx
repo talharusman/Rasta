@@ -1,10 +1,22 @@
 // Central state store for RASTA with local persistence and real backend integration
 import React, { createContext, useContext, useEffect, useState } from "react";
 import {
+  createBackendCase,
   disburseRaast,
+  fetchBackendAuditLogs,
+  fetchBackendCases,
+  fetchBackendConsents,
+  fetchBackendMetrics,
+  fetchBackendRules,
+  getStoredToken,
+  grantBackendConsent,
+  publishBackendRule,
   requestAiDecision,
+  reviewBackendCase,
   sendSms,
+  submitBackendCase,
   verifyNadra,
+  withdrawBackendConsent,
 } from "./api";
 import type {
   AppSettings,
@@ -645,6 +657,131 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem(STORAGE_KEYS.LANG, currentLang);
   }, [currentLang]);
 
+  // Backend hydration: merge live data when a real (non-demo) session exists
+  useEffect(() => {
+    const token = getStoredToken();
+    if (!token || token.startsWith("demo.")) return;
+
+    // Hydrate cases from backend
+    fetchBackendCases()
+      .then((items) => {
+        if (!items.length) return;
+        // Map backend case shape to local CaseRecord shape (best-effort)
+        const mapped = items.map((bc: any) => ({
+          id: bc.case_number || bc.id,
+          person: bc.data?.name || "Unknown",
+          cnic: bc.data?.mock_identity_id?.replace("MOCK-", "").replace(/(\d{5})(\d{7})(\d)/, "$1-$2-$3") || "—",
+          phone: bc.data?.payment_account || "—",
+          type: bc.claim_type || "Relief assistance",
+          householdIncome: bc.data?.monthly_income || 0,
+          householdMembers: bc.data?.household_size || 0,
+          address: bc.data?.address || "—",
+          status: mapBackendStatus(bc.status),
+          priority: ((bc.data?.monthly_income || 0) < 30000 ? "P1" : "P2") as CaseRecord["priority"],
+          score: bc.ai_confidence ? `${Math.round(bc.ai_confidence * 100)}%` : "—",
+          tone: mapStatusTone(bc.status),
+          date: relativeTime(bc.submitted_at || bc.created_at),
+          submittedAt: bc.submitted_at || bc.created_at || new Date().toISOString(),
+          submittedBy: bc.data?.name || "Citizen",
+          submittedByRole: "CITIZEN" as const,
+          aiRoute: bc.ai_route || "HUMAN",
+          aiReason: bc.ai_reason || "",
+          aiConfidence: bc.ai_confidence || 0.5,
+          nadraVerified: bc.nadra_verified ?? false,
+          timeline: [],
+          backendId: bc.id,
+          backendRevision: bc.revision,
+        }));
+        setCases((prev) => {
+          // Prepend backend cases that are not already in local state (by id)
+          const localIds = new Set(prev.map((c) => c.id));
+          const newOnes = mapped.filter((m: any) => !localIds.has(m.id));
+          return newOnes.length ? [...newOnes, ...prev] : prev;
+        });
+      })
+      .catch(() => {/* backend offline – silent */});
+
+    // Hydrate audit log
+    fetchBackendAuditLogs()
+      .then((items) => {
+        if (!items.length) return;
+        const mapped = items.map((a: any) => ({
+          id: a.id,
+          timestamp: a.created_at,
+          category: (a.event_type?.toUpperCase() || "CASE") as AuditEvent["category"],
+          title: a.event_type ? `Backend: ${a.event_type}` : "Backend Event",
+          actor: a.actor_id || "System",
+          actorRole: "ADMIN" as const,
+          details: JSON.stringify(a.payload || {}),
+          hash: a.id,
+          source: "api" as const,
+        }));
+        setAuditEvents((prev) => {
+          const localIds = new Set(prev.map((e) => e.id));
+          const newOnes = mapped.filter((m: any) => !localIds.has(m.id));
+          return newOnes.length ? [...newOnes, ...prev] : prev;
+        });
+      })
+      .catch(() => {/* backend offline – silent */});
+
+    // Hydrate metrics (just log to console for now — could expose via context later)
+    fetchBackendMetrics()
+      .then((m) => { console.info("[RASTA] Backend metrics:", m); })
+      .catch(() => {/* backend offline – silent */});
+
+    // Hydrate rules
+    fetchBackendRules()
+      .then((items) => {
+        if (!items.length) return;
+        const active = items.find((r: any) => r.status === "active" || r.is_active);
+        if (active) {
+          setActiveRule((prev) => ({
+            ...prev,
+            version: `v${active.version || "1.0"}`,
+            maxIncome: active.conditions_json?.max_income || prev.maxIncome,
+            requireNadra: active.conditions_json?.require_nadra ?? prev.requireNadra,
+            confidenceThreshold: active.conditions_json?.confidence_threshold || prev.confidenceThreshold,
+            notes: active.conditions_json?.notes || prev.notes,
+            updatedBy: "Backend sync",
+          }));
+        }
+      })
+      .catch(() => {/* backend offline – silent */});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Helper: map backend status string to local display status
+  function mapBackendStatus(status: string): CaseRecord["status"] {
+    switch (status) {
+      case "submitted": return "Submitted";
+      case "under_review": return "Needs review";
+      case "needs_proof": return "More information";
+      case "approved": return "Verified";
+      case "rejected": return "Rejected";
+      default: return "Needs review";
+    }
+  }
+
+  function mapStatusTone(status: string): CaseRecord["tone"] {
+    switch (status) {
+      case "approved": return "success";
+      case "rejected": return "danger";
+      case "needs_proof": return "muted";
+      case "submitted": return "neutral";
+      default: return "warning";
+    }
+  }
+
+  function relativeTime(iso?: string): string {
+    if (!iso) return "—";
+    const diff = Date.now() - new Date(iso).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 60) return `${mins} min ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs} hr ago`;
+    return `${Math.floor(hrs / 24)} days ago`;
+  }
+
   // Methods
   const logAuditEvent = (
     category: AuditEvent["category"],
@@ -764,6 +901,40 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     setCases((prev) => [newCase, ...prev]);
 
+    // Persist to backend (fire-and-forget, optimistic UI already updated)
+    const token = getStoredToken();
+    if (token && !token.startsWith("demo.")) {
+      (async () => {
+        try {
+          // Try to get citizen_id from stored session
+          const sessionRaw = localStorage.getItem("rasta.session.v2");
+          const session = sessionRaw ? JSON.parse(sessionRaw) : null;
+          const citizenId = session?.user?.citizen_id;
+          if (citizenId) {
+            const idempotencyKey = `${citizenId}-${nextId}`;
+            const created = await createBackendCase({
+              citizen_id: citizenId,
+              claim_type: "relief_payment",
+              idempotency_key: idempotencyKey,
+              data: {
+                name: payload.person,
+                mock_identity_id: `MOCK-${payload.cnic.replace(/-/g, "")}`,
+                monthly_income: payload.householdIncome,
+                household_size: payload.householdMembers,
+                payment_account: payload.cnic.replace(/-/g, ""),
+              },
+            });
+            // Auto-submit so it enters review queue
+            if (created?.id) {
+              await submitBackendCase(created.id, 0).catch(() => {/* ok */});
+            }
+          }
+        } catch (err) {
+          console.warn("[RASTA] Backend case persist failed (non-blocking):", err);
+        }
+      })();
+    }
+
     // Audit log
     logAuditEvent(
       "CASE",
@@ -876,6 +1047,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         ...prev,
       ]);
 
+      _syncOfficerAction(caseId, "approve", notes);
       return { success: true, raastTxn, smsSent };
     }
 
@@ -922,6 +1094,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         "OFFICER"
       );
 
+      _syncOfficerAction(caseId, "ask_proof", notes, ["identity_proof", "income_proof"]);
       return { success: true, smsSent };
     }
 
@@ -965,10 +1138,24 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         "OFFICER"
       );
 
+      _syncOfficerAction(caseId, "reject", notes);
       return { success: true };
     }
 
     return { success: false };
+  };
+
+  // --- Backend sync helper for officer actions (fire-and-forget) ---
+  const _syncOfficerAction = (
+    caseId: string,
+    backendAction: "approve" | "reject" | "ask_proof",
+    notes: string,
+    requiredDocs: string[] = []
+  ) => {
+    const token = getStoredToken();
+    if (!token || token.startsWith("demo.")) return;
+    reviewBackendCase(caseId, backendAction, notes || backendAction, 0, requiredDocs)
+      .catch((e) => console.warn(`[RASTA] Backend ${backendAction} sync failed:`, e));
   };
 
   const grantConsent = (payload: {
@@ -999,6 +1186,22 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     setConsents((prev) => [newRecord, ...prev]);
 
+    // Persist to backend (fire-and-forget)
+    const token = getStoredToken();
+    if (token && !token.startsWith("demo.")) {
+      const sessionRaw = localStorage.getItem("rasta.session.v2");
+      const session = sessionRaw ? JSON.parse(sessionRaw) : null;
+      const citizenId = session?.user?.citizen_id;
+      if (citizenId) {
+        grantBackendConsent({
+          citizen_id: citizenId,
+          scope: payload.scope,
+          purpose: payload.grantee,
+          grantee_id: null,
+        }).catch((e) => console.warn("[RASTA] Backend consent grant failed:", e));
+      }
+    }
+
     logAuditEvent(
       "CONSENT",
       `Consent Granted for ${payload.citizenName}`,
@@ -1015,6 +1218,13 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     setConsents((prev) =>
       prev.map((c) => (c.id === id ? { ...c, status: "Revoked" } : c))
     );
+
+    // Persist revocation to backend (fire-and-forget)
+    const token = getStoredToken();
+    if (token && !token.startsWith("demo.")) {
+      withdrawBackendConsent(id)
+        .catch((e) => console.warn("[RASTA] Backend consent revoke failed:", e));
+    }
 
     logAuditEvent(
       "CONSENT",
@@ -1071,6 +1281,29 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       actorName,
       "ADMIN"
     );
+
+    // Persist to backend (fire-and-forget)
+    const token = getStoredToken();
+    if (token && !token.startsWith("demo.")) {
+      fetchBackendRules()
+        .then((rules) => {
+          const activeBackendRule = rules.find((r: any) => r.is_active || r.status === "active");
+          if (activeBackendRule?.id) {
+            publishBackendRule(
+              activeBackendRule.id,
+              activeBackendRule.version || 1,
+              {
+                max_income: published.maxIncome,
+                require_nadra: published.requireNadra,
+                confidence_threshold: published.confidenceThreshold,
+                route_action: published.routeAction,
+              },
+              `Published by ${actorName}`
+            ).catch((e) => console.warn("[RASTA] Backend rule publish failed:", e));
+          }
+        })
+        .catch((e) => console.warn("[RASTA] Backend rules fetch failed:", e));
+    }
   };
 
   const markNotificationRead = (id: string) => {

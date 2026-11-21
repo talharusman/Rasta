@@ -1,0 +1,10 @@
+{
+  "tenant_id": "11111111-1111-4111-8111-111111111111",
+  "users": [
+    {"id": "REPLACE_WITH_CITIZEN_AUTH_UUID", "name": "Synthetic Citizen", "role": "citizen"},
+    {"id": "REPLACE_WITH_HELPER_AUTH_UUID", "name": "Synthetic Helper", "role": "helper"},
+    {"id": "REPLACE_WITH_OFFICER_AUTH_UUID", "name": "Synthetic Officer", "role": "officer"},
+    {"id": "REPLACE_WITH_ADMIN_AUTH_UUID", "name": "Synthetic Admin", "role": "admin"},
+    {"id": "REPLACE_WITH_AUDITOR_AUTH_UUID", "name": "Synthetic Auditor", "role": "auditor"}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "tenant_id": "11111111-1111-4111-8111-111111111111",
+  "users": [
+    {"id": "1a4c8fd6-5f1d-4d64-b143-e3ddbeeb7033", "name": "Synthetic Citizen", "role": "citizen"},
+    {"id": "7ad5b1c1-61ca-46bd-b2f0-1bb9dca2c17d", "name": "Synthetic Helper", "role": "helper"},
+    {"id": "5b51743a-b609-42bb-88d3-55676a8dd357", "name": "Synthetic Officer", "role": "officer"},
+    {"id": "e5da9580-182c-4163-b2fa-de6532ca4e54", "name": "Synthetic Admin", "role": "admin"},
+    {"id": "6e51e997-8887-4da2-b1be-a28e98b964fe", "name": "Synthetic Auditor", "role": "auditor"}
+  ]
+}
