@@ -111,10 +111,15 @@ class ServiceClient:
         self.breaker = breaker or CircuitBreaker()
         self._transport = transport
         self._client: Optional[httpx.AsyncClient] = None
+        self._client_loop: Optional[asyncio.AbstractEventLoop] = None
 
     def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None:
+        # An AsyncClient is tied to the event loop that first used it. Background agent
+        # runs may use a different loop, so rebuild the client when the loop changes.
+        loop = asyncio.get_running_loop()
+        if self._client is None or self._client_loop is not loop:
             self._client = httpx.AsyncClient(base_url=self.base_url, transport=self._transport)
+            self._client_loop = loop
         return self._client
 
     async def aclose(self) -> None:
