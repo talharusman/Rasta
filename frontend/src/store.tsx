@@ -1,14 +1,22 @@
 // Central state store for RASTA with local persistence and real backend integration
 import React, { createContext, useContext, useEffect, useState } from "react";
 import {
+  ApiError,
+  assignBackendOfficer,
   createBackendCase,
+  fetchBackendCaseDetail,
+  fetchBackendCitizens,
+  fetchBackendNotifications,
+  fetchBackendReviewQueue,
+  uploadBackendEvidence,
+  type BackendCase,
+  type BackendReviewCase,
+  type EvidenceType,
   disburseRaast,
   fetchBackendAuditLogs,
   fetchBackendCases,
   fetchBackendConsents,
-  fetchBackendMetrics,
   fetchBackendRules,
-  getStoredToken,
   grantBackendConsent,
   publishBackendRule,
   requestAiDecision,
@@ -18,6 +26,7 @@ import {
   verifyNadra,
   withdrawBackendConsent,
 } from "./api";
+import { useAuth } from "./auth";
 import type {
   AppSettings,
   AuditEvent,
@@ -29,6 +38,7 @@ import type {
 } from "./types";
 
 interface HelperCitizen {
+  id?: string;
   name: string;
   cnic: string;
   phone: string;
@@ -52,12 +62,18 @@ interface DataContextValue {
     notes?: string;
     submittedBy: string;
     submittedByRole: Role;
+    paymentAccount?: string;
+    idempotencyKey?: string;
+    evidence?: Partial<Record<EvidenceType, File>>;
   }) => Promise<{ caseId: string; backendAi: boolean; backendNadra: boolean }>;
+  assignCase: (caseId: string, revision: number) => Promise<void>;
+  resumeCase: (caseId: string, evidence: Partial<Record<EvidenceType, File>>) => Promise<void>;
   officerAction: (
     caseId: string,
     action: "approve" | "reject" | "request_evidence",
     notes: string,
-    officerName: string
+    officerName: string,
+    overrideReason?: string
   ) => Promise<{ success: boolean; smsSent?: boolean; raastTxn?: string; note?: string }>;
 
   // Consents
@@ -71,8 +87,8 @@ interface DataContextValue {
     source: "citizen" | "helper_proxy";
     actorName: string;
     actorRole: Role;
-  }) => void;
-  revokeConsent: (id: string, actorName: string, actorRole: Role) => void;
+  }) => Promise<void>;
+  revokeConsent: (id: string, actorName: string, actorRole: Role) => Promise<void>;
 
   // Audit
   auditEvents: AuditEvent[];
@@ -89,7 +105,7 @@ interface DataContextValue {
   draftRule: PolicyRule;
   ruleHistory: PolicyRule[];
   updateDraftRule: (updates: Partial<PolicyRule>) => void;
-  publishDraftRule: (actorName: string) => void;
+  publishDraftRule: (actorName: string) => Promise<void>;
 
   // Notifications
   notifications: NotificationItem[];
@@ -494,18 +510,35 @@ function generateSimHash(): string {
 const DataContext = createContext<DataContextValue | null>(null);
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
-  // Cases state
-  const [cases, setCases] = useState<CaseRecord[]>(() => {
+  const { user } = useAuth();
+  const liveActor = user?.source === "api" ? user.id : undefined;
+  const liveRole = user?.source === "api" ? user.role : undefined;
+  const [live, setLive] = useState<{
+    owner: string;
+    cases: CaseRecord[];
+    citizens: HelperCitizen[];
+    notifications: NotificationItem[];
+    consents: ConsentRecord[];
+    audit: AuditEvent[];
+  }>();
+  const [notificationActions, setNotificationActions] = useState<{
+    owner: string; read: string[]; dismissed: string[];
+  }>();
+  const [livePolicy, setLivePolicy] = useState<{ owner: string; policy: PolicyRule }>();
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const refreshLive = () => setRefreshVersion((value) => value + 1);
+
+  const [demoCases, setCases] = useState<CaseRecord[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.CASES);
-      return saved ? JSON.parse(saved) : initialCases;
+      return saved ? (JSON.parse(saved) as CaseRecord[]).filter((item) => !("backendId" in item)) : initialCases;
     } catch {
       return initialCases;
     }
   });
 
   // Consents state
-  const [consents, setConsents] = useState<ConsentRecord[]>(() => {
+  const [demoConsents, setConsents] = useState<ConsentRecord[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.CONSENTS);
       return saved ? JSON.parse(saved) : initialConsents;
@@ -515,7 +548,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   });
 
   // Audit state
-  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>(() => {
+  const [demoAudit, setAuditEvents] = useState<AuditEvent[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.AUDIT);
       return saved ? JSON.parse(saved) : initialAudit;
@@ -525,7 +558,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   });
 
   // Rules state
-  const [activeRule, setActiveRule] = useState<PolicyRule>(() => {
+  const [demoRule, setActiveRule] = useState<PolicyRule>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.RULES);
       if (saved) {
@@ -567,7 +600,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   ]);
 
   // Notifications state
-  const [notifications, setNotifications] = useState<NotificationItem[]>(() => {
+  const [demoNotifications, setNotifications] = useState<NotificationItem[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
       return saved ? JSON.parse(saved) : initialNotifications;
@@ -598,7 +631,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     return localStorage.getItem(STORAGE_KEYS.HELPER_ACTIVE) || "Ayesha Bibi";
   });
 
-  const [authorizedCitizens, setAuthorizedCitizens] = useState<HelperCitizen[]>(() => {
+  const [demoCitizens, setAuthorizedCitizens] = useState<HelperCitizen[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.CITIZENS);
       return saved ? JSON.parse(saved) : initialAuthorizedCitizens;
@@ -623,153 +656,151 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   // Persistence effects
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.CASES, JSON.stringify(cases));
-  }, [cases]);
+    localStorage.setItem(STORAGE_KEYS.CASES, JSON.stringify(demoCases));
+  }, [demoCases]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.CONSENTS, JSON.stringify(consents));
-  }, [consents]);
+    localStorage.setItem(STORAGE_KEYS.CONSENTS, JSON.stringify(demoConsents));
+  }, [demoConsents]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.AUDIT, JSON.stringify(auditEvents));
-  }, [auditEvents]);
+    localStorage.setItem(STORAGE_KEYS.AUDIT, JSON.stringify(demoAudit.filter((event) => event.source !== "api")));
+  }, [demoAudit]);
 
   useEffect(() => {
+    if (liveActor) return;
     localStorage.setItem(
       STORAGE_KEYS.RULES,
-      JSON.stringify({ active: activeRule, draft: draftRule })
+      JSON.stringify({ active: demoRule, draft: draftRule })
     );
-  }, [activeRule, draftRule]);
+  }, [liveActor, demoRule, draftRule]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifications));
-  }, [notifications]);
+    localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(demoNotifications));
+  }, [demoNotifications]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(settings));
   }, [settings]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.CITIZENS, JSON.stringify(authorizedCitizens));
-  }, [authorizedCitizens]);
+    localStorage.setItem(STORAGE_KEYS.CITIZENS, JSON.stringify(demoCitizens));
+  }, [demoCitizens]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.LANG, currentLang);
   }, [currentLang]);
 
-  // Backend hydration: merge live data when a real (non-demo) session exists
+  const activeRule = liveActor && livePolicy?.owner === liveActor ? livePolicy.policy : demoRule;
+  const currentLive = liveActor && live?.owner === liveActor ? live : undefined;
+  const cases = liveActor ? currentLive?.cases ?? [] : demoCases;
+  const consents = liveActor ? currentLive?.consents ?? [] : demoConsents;
+  const auditEvents = liveActor ? currentLive?.audit ?? [] : demoAudit;
+  const actions = notificationActions?.owner === liveActor ? notificationActions : undefined;
+  const notifications = liveActor
+    ? (currentLive?.notifications ?? []).filter((item) => !actions?.dismissed.includes(item.id))
+      .map((item) => ({ ...item, read: actions?.read.includes(item.id) ?? false }))
+    : demoNotifications;
+  const authorizedCitizens = liveActor ? currentLive?.citizens ?? [] : demoCitizens;
+
   useEffect(() => {
-    const token = getStoredToken();
-    if (!token || token.startsWith("demo.")) return;
-
-    // Hydrate cases from backend
-    fetchBackendCases()
-      .then((items) => {
-        if (!items.length) return;
-        // Map backend case shape to local CaseRecord shape (best-effort)
-        const mapped = items.map((bc: any) => ({
-          id: bc.case_number || bc.id,
-          person: bc.data?.name || "Unknown",
-          cnic: bc.data?.mock_identity_id?.replace("MOCK-", "").replace(/(\d{5})(\d{7})(\d)/, "$1-$2-$3") || "—",
-          phone: bc.data?.payment_account || "—",
-          type: bc.claim_type || "Relief assistance",
-          householdIncome: bc.data?.monthly_income || 0,
-          householdMembers: bc.data?.household_size || 0,
-          address: bc.data?.address || "—",
-          status: mapBackendStatus(bc.status),
-          priority: ((bc.data?.monthly_income || 0) < 30000 ? "P1" : "P2") as CaseRecord["priority"],
-          score: bc.ai_confidence ? `${Math.round(bc.ai_confidence * 100)}%` : "—",
-          tone: mapStatusTone(bc.status),
-          date: relativeTime(bc.submitted_at || bc.created_at),
-          submittedAt: bc.submitted_at || bc.created_at || new Date().toISOString(),
-          submittedBy: bc.data?.name || "Citizen",
-          submittedByRole: "CITIZEN" as const,
-          aiRoute: bc.ai_route || "HUMAN",
-          aiReason: bc.ai_reason || "",
-          aiConfidence: bc.ai_confidence || 0.5,
-          nadraVerified: bc.nadra_verified ?? false,
-          timeline: [],
-          backendId: bc.id,
-          backendRevision: bc.revision,
-        }));
-        setCases((prev) => {
-          // Prepend backend cases that are not already in local state (by id)
-          const localIds = new Set(prev.map((c) => c.id));
-          const newOnes = mapped.filter((m: any) => !localIds.has(m.id));
-          return newOnes.length ? [...newOnes, ...prev] : prev;
-        });
-      })
-      .catch(() => {/* backend offline – silent */});
-
-    // Hydrate audit log
-    fetchBackendAuditLogs()
-      .then((items) => {
-        if (!items.length) return;
-        const mapped = items.map((a: any) => ({
-          id: a.id,
-          timestamp: a.created_at,
-          category: (a.event_type?.toUpperCase() || "CASE") as AuditEvent["category"],
-          title: a.event_type ? `Backend: ${a.event_type}` : "Backend Event",
-          actor: a.actor_id || "System",
-          actorRole: "ADMIN" as const,
-          details: JSON.stringify(a.payload || {}),
-          hash: a.id,
-          source: "api" as const,
-        }));
-        setAuditEvents((prev) => {
-          const localIds = new Set(prev.map((e) => e.id));
-          const newOnes = mapped.filter((m: any) => !localIds.has(m.id));
-          return newOnes.length ? [...newOnes, ...prev] : prev;
-        });
-      })
-      .catch(() => {/* backend offline – silent */});
-
-    // Hydrate metrics (just log to console for now — could expose via context later)
-    fetchBackendMetrics()
-      .then((m) => { console.info("[RASTA] Backend metrics:", m); })
-      .catch(() => {/* backend offline – silent */});
-
-    // Hydrate rules
-    fetchBackendRules()
-      .then((items) => {
-        if (!items.length) return;
-        const active = items.find((r: any) => r.status === "active" || r.is_active);
-        if (active) {
-          setActiveRule((prev) => ({
-            ...prev,
-            version: `v${active.version || "1.0"}`,
-            maxIncome: active.conditions_json?.max_income || prev.maxIncome,
-            requireNadra: active.conditions_json?.require_nadra ?? prev.requireNadra,
-            confidenceThreshold: active.conditions_json?.confidence_threshold || prev.confidenceThreshold,
-            notes: active.conditions_json?.notes || prev.notes,
-            updatedBy: "Backend sync",
-          }));
+    if (!liveActor || !liveRole) {
+      setLive(undefined);
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const load = async () => {
+      const [casesResult, queueResult, citizensResult, consentsResult, notificationsResult, auditResult] =
+        await Promise.allSettled([
+          fetchBackendCases(),
+          liveRole === "OFFICER" ? fetchBackendReviewQueue() : Promise.resolve([]),
+          liveRole === "HELPER" ? fetchBackendCitizens() : Promise.resolve([]),
+          liveRole !== "OFFICER" ? fetchBackendConsents() : Promise.resolve([]),
+          fetchBackendNotifications(),
+          liveRole === "ADMIN" || liveRole === "AUDITOR" ? fetchBackendAuditLogs() : Promise.resolve([]),
+        ]);
+      if (cancelled) return;
+      const rows = new Map<string, BackendReviewCase>();
+      for (const result of [queueResult, casesResult]) {
+        if (result.status === "fulfilled") {
+          for (const row of result.value) rows.set(row.case_id, row);
         }
-      })
-      .catch(() => {/* backend offline – silent */});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      }
+      const owned = {
+        owner: liveActor,
+        cases: [...rows.values()].map(mapBackendCase),
+        citizens: citizensResult.status === "fulfilled" ? citizensResult.value.map((citizen) => ({
+          id: citizen.id, name: citizen.name, cnic: citizen.mock_identity_id, phone: "",
+          relationship: "Authorized citizen", consentActive: true,
+          casesCount: 0,
+        })) : [],
+        consents: consentsResult.status === "fulfilled" ? consentsResult.value.map((row) => ({
+          id: row.id, citizenName: row.citizen_id, citizenCnic: "",
+          grantee: row.grantee_id ?? "Relief processing", scope: row.scope,
+          grantedAt: row.created_at, expiresAt: "", status: row.revoked_at ? "Revoked" as const : "Active" as const,
+          source: "citizen" as const,
+        })) : [],
+        notifications: notificationsResult.status === "fulfilled" ? notificationsResult.value.map((row) => ({
+          id: row.id, title: "Case update", message: row.message, caseId: row.case_id,
+          time: relativeTime(row.created_at), read: false, type: "info" as const,
+        })) : [],
+        audit: auditResult.status === "fulfilled" ? auditResult.value.map((row) => ({
+          id: row.id, timestamp: row.created_at, category: "CASE" as const,
+          title: row.action, actor: row.actor_id ?? row.actor_type, actorRole: "ADMIN" as const,
+          details: JSON.stringify(row.details), hash: row.id, source: "api" as const,
+        })) : [],
+      };
+      setLive(owned);
+      timer = setTimeout(load, 5000);
+    };
+    void load();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [liveActor, liveRole, refreshVersion]);
 
-  // Helper: map backend status string to local display status
-  function mapBackendStatus(status: string): CaseRecord["status"] {
-    switch (status) {
-      case "submitted": return "Submitted";
-      case "under_review": return "Needs review";
-      case "needs_proof": return "More information";
-      case "approved": return "Verified";
-      case "rejected": return "Rejected";
-      default: return "Needs review";
-    }
-  }
+  useEffect(() => {
+    if (!liveActor || !liveRole || !["OFFICER", "ADMIN", "AUDITOR"].includes(liveRole)) return;
+    let cancelled = false;
+    void fetchBackendRules().then((rules) => {
+      const active = rules.find((rule) => rule.active);
+      if (cancelled || !active) return;
+      const policy: PolicyRule = {
+        version: `v${active.version}`, name: active.rule_name, status: "Active",
+        maxIncome: active.conditions_json.max_monthly_income, requireNadra: true,
+        confidenceThreshold: Math.round(active.conditions_json.clear_confidence_min * 100),
+        routeAction: "HUMAN", updatedAt: active.created_at, updatedBy: "Published policy", notes: "",
+      };
+      setLivePolicy({ owner: liveActor, policy });
+      setDraftRule({ ...policy, status: "Draft" });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [liveActor, liveRole]);
 
-  function mapStatusTone(status: string): CaseRecord["tone"] {
-    switch (status) {
-      case "approved": return "success";
-      case "rejected": return "danger";
-      case "needs_proof": return "muted";
-      case "submitted": return "neutral";
-      default: return "warning";
-    }
+  function mapBackendCase(row: BackendReviewCase & Partial<BackendCase>): CaseRecord {
+    const labels: Record<BackendCase["status"], CaseRecord["status"]> = {
+      draft: "Draft", submitted: "Submitted", processing: "Processing", cleared: "Checks passed",
+      needs_proof: "More information", human_review: "Needs review",
+      approved: "Verified", rejected: "Rejected", closed: "Closed",
+    };
+    const confidence = row.decision?.confidence;
+    const tone = row.status === "approved" ? "success" : row.status === "rejected" ? "danger"
+      : row.status === "human_review" ? "warning" : "neutral";
+    return {
+      id: row.case_id, person: row.data?.name ?? "Unassigned case", cnic: row.data?.mock_identity_id ?? "—",
+      phone: row.data?.citizen_phone ?? "—", type: row.claim_type ?? "Relief assistance",
+      householdIncome: row.data?.monthly_income ?? 0, householdMembers: row.data?.household_size ?? 0,
+      address: "—", status: labels[row.status], tone,
+      priority: row.data && row.data.monthly_income < 30000 ? "P1" : "P2",
+      score: confidence == null ? "—" : `${Math.round(confidence * 100)}%`,
+      date: relativeTime(row.created_at), submittedAt: row.created_at, submittedBy: row.data?.name ?? "—",
+      submittedByRole: "CITIZEN", aiRoute: row.decision?.route ?? "Pending",
+      aiReason: row.user_explanation ?? "Automated assessment pending.",
+      aiConfidence: confidence ?? 0, nadraVerified: row.decision?.identity_verified,
+      timeline: [], backendStatus: row.status, backendRevision: row.revision,
+      requiredDocuments: row.required_documents, assignedOfficerId: row.assigned_officer_id,
+      paymentStatus: row.payment?.status, paymentTxnId: row.payment?.transaction_id ?? undefined,
+      paymentAmount: row.payment?.amount ?? undefined,
+    };
   }
 
   function relativeTime(iso?: string): string {
@@ -817,7 +848,40 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     notes?: string;
     submittedBy: string;
     submittedByRole: Role;
+    paymentAccount?: string;
+    idempotencyKey?: string;
+    evidence?: Partial<Record<EvidenceType, File>>;
   }) => {
+    if (liveActor) {
+      const citizenId = user?.role === "HELPER"
+        ? authorizedCitizens.find((citizen) => citizen.name === helperActiveCitizen)?.id
+        : user?.citizen_id;
+      if (!citizenId) throw new Error("Select an authorized citizen first.");
+      if (user?.role === "CITIZEN") {
+        for (const scope of ["identity:verify", "ai:process"]) {
+          await grantBackendConsent({ citizen_id: citizenId, scope, purpose: "processing" });
+        }
+      }
+      const identity = payload.cnic.trim().toUpperCase();
+      const phone = payload.phone.replace(/[ -]/g, "");
+      if (phone && !/^\+920[0-9]{9}$/.test(phone)) {
+        throw new Error("Enter a synthetic SMS number such as +920000000001, or leave it blank.");
+      }
+      const created = await createBackendCase({
+        citizen_id: citizenId,
+        idempotency_key: payload.idempotencyKey ?? crypto.randomUUID(),
+        data: {
+          name: payload.person,
+          mock_identity_id: identity.startsWith("MOCK-") ? identity : `MOCK-${identity.replace(/-/g, "")}`,
+          payment_account: payload.paymentAccount?.trim().toUpperCase() ?? "",
+          monthly_income: payload.householdIncome, household_size: payload.householdMembers,
+          citizen_phone: phone || undefined,
+        },
+      });
+      if (created.status === "draft") await uploadAndSubmit(created, payload.evidence ?? {});
+      refreshLive();
+      return { caseId: created.case_id, backendAi: false, backendNadra: false };
+    }
     let aiRoute = "HUMAN";
     let aiReason = "Automated escalation";
     let aiConfidence = 0.65;
@@ -902,39 +966,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     setCases((prev) => [newCase, ...prev]);
 
     // Persist to backend (fire-and-forget, optimistic UI already updated)
-    const token = getStoredToken();
-    if (token && !token.startsWith("demo.")) {
-      (async () => {
-        try {
-          // Try to get citizen_id from stored session
-          const sessionRaw = localStorage.getItem("rasta.session.v2");
-          const session = sessionRaw ? JSON.parse(sessionRaw) : null;
-          const citizenId = session?.user?.citizen_id;
-          if (citizenId) {
-            const idempotencyKey = `${citizenId}-${nextId}`;
-            const created = await createBackendCase({
-              citizen_id: citizenId,
-              claim_type: "relief_payment",
-              idempotency_key: idempotencyKey,
-              data: {
-                name: payload.person,
-                mock_identity_id: `MOCK-${payload.cnic.replace(/-/g, "")}`,
-                monthly_income: payload.householdIncome,
-                household_size: payload.householdMembers,
-                payment_account: payload.cnic.replace(/-/g, ""),
-              },
-            });
-            // Auto-submit so it enters review queue
-            if (created?.id) {
-              await submitBackendCase(created.id, 0).catch(() => {/* ok */});
-            }
-          }
-        } catch (err) {
-          console.warn("[RASTA] Backend case persist failed (non-blocking):", err);
-        }
-      })();
-    }
-
     // Audit log
     logAuditEvent(
       "CASE",
@@ -961,14 +992,60 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     return { caseId: nextId, backendAi, backendNadra };
   };
 
+  async function uploadAndSubmit(current: BackendCase, evidence: Partial<Record<EvidenceType, File>>) {
+    let revision = current.revision;
+    for (const [type, file] of Object.entries(evidence) as [EvidenceType, File][]) {
+      const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      const sha = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      if (!current.documents.some((document) => document.type === type && document.sha256 === sha)
+          || current.status === "needs_proof") {
+        revision = (await uploadBackendEvidence(current.case_id, revision, type, file)).revision;
+      }
+    }
+    await submitBackendCase(current.case_id, revision);
+  }
+
+  async function assignCase(caseId: string, revision: number) {
+    if (!liveActor || liveRole !== "OFFICER") throw new Error("Officer session required.");
+    await assignBackendOfficer(caseId, liveActor, revision, "Assigned for review");
+    refreshLive();
+  }
+
+  async function resumeCase(caseId: string, evidence: Partial<Record<EvidenceType, File>>) {
+    await uploadAndSubmit(await fetchBackendCaseDetail(caseId), evidence);
+    refreshLive();
+  }
+
   const officerAction = async (
     caseId: string,
     action: "approve" | "reject" | "request_evidence",
     notes: string,
-    officerName: string
+    officerName: string,
+    overrideReason?: string
   ) => {
     const targetCase = cases.find((c) => c.id === caseId);
     if (!targetCase) return { success: false, note: "Case not found" };
+
+    if (liveActor) {
+      try {
+        let current = targetCase;
+        if (!current.assignedOfficerId && liveRole === "OFFICER") {
+          const assigned = await assignBackendOfficer(caseId, liveActor, current.backendRevision!, "Assigned for review");
+          current = mapBackendCase(assigned);
+        }
+        const backendAction = action === "request_evidence" ? "ask_proof" : action;
+        await reviewBackendCase(caseId, backendAction, notes || backendAction, current.backendRevision!,
+          backendAction === "ask_proof" ? ["identity_proof", "income_proof"] : [], overrideReason);
+        refreshLive();
+        return { success: true };
+      } catch (error) {
+        refreshLive();
+        const note = error instanceof ApiError && error.status === 409
+          ? `${error.message} The case will refresh.`
+          : error instanceof Error ? error.message : "Review failed.";
+        return { success: false, note };
+      }
+    }
 
     const nowTime = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
@@ -1047,7 +1124,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         ...prev,
       ]);
 
-      _syncOfficerAction(caseId, "approve", notes);
       return { success: true, raastTxn, smsSent };
     }
 
@@ -1094,7 +1170,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         "OFFICER"
       );
 
-      _syncOfficerAction(caseId, "ask_proof", notes, ["identity_proof", "income_proof"]);
       return { success: true, smsSent };
     }
 
@@ -1138,7 +1213,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         "OFFICER"
       );
 
-      _syncOfficerAction(caseId, "reject", notes);
       return { success: true };
     }
 
@@ -1146,19 +1220,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   };
 
   // --- Backend sync helper for officer actions (fire-and-forget) ---
-  const _syncOfficerAction = (
-    caseId: string,
-    backendAction: "approve" | "reject" | "ask_proof",
-    notes: string,
-    requiredDocs: string[] = []
-  ) => {
-    const token = getStoredToken();
-    if (!token || token.startsWith("demo.")) return;
-    reviewBackendCase(caseId, backendAction, notes || backendAction, 0, requiredDocs)
-      .catch((e) => console.warn(`[RASTA] Backend ${backendAction} sync failed:`, e));
-  };
-
-  const grantConsent = (payload: {
+  const grantConsent = async (payload: {
     citizenName: string;
     citizenCnic: string;
     grantee: string;
@@ -1168,6 +1230,15 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     actorName: string;
     actorRole: Role;
   }) => {
+    if (liveActor) {
+      if (!user?.citizen_id || user.role !== "CITIZEN") throw new Error("Only the citizen can grant access.");
+      const scopes = payload.scope === "processing"
+        ? ["identity:verify", "ai:process"] : ["case:read", "case:write", "document:upload", "case:submit"];
+      await Promise.all(scopes.map((scope) => grantBackendConsent({ citizen_id: user.citizen_id!, scope,
+        ...(payload.scope === "processing" ? { purpose: "processing" } : { grantee_id: payload.grantee }) })));
+      refreshLive();
+      return;
+    }
     const granted = new Date();
     const expires = new Date();
     expires.setMonth(expires.getMonth() + payload.durationMonths);
@@ -1186,22 +1257,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     setConsents((prev) => [newRecord, ...prev]);
 
-    // Persist to backend (fire-and-forget)
-    const token = getStoredToken();
-    if (token && !token.startsWith("demo.")) {
-      const sessionRaw = localStorage.getItem("rasta.session.v2");
-      const session = sessionRaw ? JSON.parse(sessionRaw) : null;
-      const citizenId = session?.user?.citizen_id;
-      if (citizenId) {
-        grantBackendConsent({
-          citizen_id: citizenId,
-          scope: payload.scope,
-          purpose: payload.grantee,
-          grantee_id: null,
-        }).catch((e) => console.warn("[RASTA] Backend consent grant failed:", e));
-      }
-    }
-
     logAuditEvent(
       "CONSENT",
       `Consent Granted for ${payload.citizenName}`,
@@ -1211,20 +1266,18 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     );
   };
 
-  const revokeConsent = (id: string, actorName: string, actorRole: Role) => {
+  const revokeConsent = async (id: string, actorName: string, actorRole: Role) => {
+    if (liveActor) {
+      await withdrawBackendConsent(id);
+      refreshLive();
+      return;
+    }
     const target = consents.find((c) => c.id === id);
     if (!target) return;
 
     setConsents((prev) =>
       prev.map((c) => (c.id === id ? { ...c, status: "Revoked" } : c))
     );
-
-    // Persist revocation to backend (fire-and-forget)
-    const token = getStoredToken();
-    if (token && !token.startsWith("demo.")) {
-      withdrawBackendConsent(id)
-        .catch((e) => console.warn("[RASTA] Backend consent revoke failed:", e));
-    }
 
     logAuditEvent(
       "CONSENT",
@@ -1243,7 +1296,19 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }));
   };
 
-  const publishDraftRule = (actorName: string) => {
+  const publishDraftRule = async (actorName: string) => {
+    if (liveActor) {
+      const active = (await fetchBackendRules()).find((rule) => rule.active);
+      if (!active) throw new Error("No active policy is configured.");
+      const published = await publishBackendRule(active.id, active.version, {
+        ...active.conditions_json,
+        max_monthly_income: draftRule.maxIncome,
+        clear_confidence_min: draftRule.confidenceThreshold / 100,
+      }, `Published by ${actorName}`);
+      setLivePolicy({ owner: liveActor, policy: { ...draftRule, status: "Active",
+        version: `v${published.version}`, updatedBy: actorName } });
+      return;
+    }
     const publishedVersion = draftRule.version;
     const published: PolicyRule = {
       ...draftRule,
@@ -1282,37 +1347,26 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       "ADMIN"
     );
 
-    // Persist to backend (fire-and-forget)
-    const token = getStoredToken();
-    if (token && !token.startsWith("demo.")) {
-      fetchBackendRules()
-        .then((rules) => {
-          const activeBackendRule = rules.find((r: any) => r.is_active || r.status === "active");
-          if (activeBackendRule?.id) {
-            publishBackendRule(
-              activeBackendRule.id,
-              activeBackendRule.version || 1,
-              {
-                max_income: published.maxIncome,
-                require_nadra: published.requireNadra,
-                confidence_threshold: published.confidenceThreshold,
-                route_action: published.routeAction,
-              },
-              `Published by ${actorName}`
-            ).catch((e) => console.warn("[RASTA] Backend rule publish failed:", e));
-          }
-        })
-        .catch((e) => console.warn("[RASTA] Backend rules fetch failed:", e));
-    }
+
+  };
+
+  const updateNotificationActions = (id: string, action: "read" | "dismissed") => {
+    if (!liveActor) return;
+    setNotificationActions((previous) => {
+      const current = previous?.owner === liveActor ? previous : { owner: liveActor, read: [], dismissed: [] };
+      return { ...current, [action]: [...new Set([...current[action], id])] };
+    });
   };
 
   const markNotificationRead = (id: string) => {
+    if (liveActor) return updateNotificationActions(id, "read");
     setNotifications((prev) =>
       prev.map((n) => (n.id === id ? { ...n, read: true } : n))
     );
   };
 
   const dismissNotification = (id: string) => {
+    if (liveActor) return updateNotificationActions(id, "dismissed");
     setNotifications((prev) => prev.filter((n) => n.id !== id));
   };
 
@@ -1352,6 +1406,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     cases,
     getCase,
     createCase,
+    assignCase,
+    resumeCase,
     officerAction,
     consents,
     grantConsent,

@@ -6,11 +6,13 @@
 # `await aenqueue(...)`.
 import asyncio
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from app.agent import platform_bridge
@@ -53,6 +55,7 @@ def enqueue(
     delay_seconds: float = 0,
     max_attempts: int = 4,
     dedupe_key: Optional[str] = None,
+    db: Session | None = None,
 ) -> Dict[str, Any]:
     """Add a job. If dedupe_key already exists (in ANY status) the existing job is
     returned and nothing new is created. The result has "deduplicated": bool."""
@@ -68,18 +71,20 @@ def enqueue(
             return None
         return s.execute(select(Job).where(Job.dedupe_key == dedupe_key)).scalar_one_or_none()
 
-    with session() as s:
+    with (session() if db is None else nullcontext(db)) as s:
         found = existing(s)
         if found is not None:
             return {**snapshot(found), "deduplicated": True}
         job = Job(kind=kind, payload=dict(payload or {}), status="queued", attempts=0,
                   max_attempts=max_attempts, dedupe_key=dedupe_key,
                   run_after=datetime.now(timezone.utc) + timedelta(seconds=delay_seconds))
-        s.add(job)
         try:
-            s.commit()
+            with s.begin_nested():
+                s.add(job)
+                s.flush()
+            if db is None:
+                s.commit()
         except IntegrityError:  # a concurrent enqueue with the same key won
-            s.rollback()
             found = existing(s)
             if found is None:
                 raise
@@ -106,13 +111,20 @@ def get_job(job_id: str) -> Optional[Dict[str, Any]]:
         return snapshot(j) if j else None
 
 
-def list_jobs(status: Optional[str] = None, kind: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+def list_jobs(status: Optional[str] = None, kind: Optional[str] = None, limit: int = 100, tenant_id=None) -> List[Dict[str, Any]]:
     with session() as s:
         q = select(Job)
         if status:
             q = q.where(Job.status == status)
         if kind:
             q = q.where(Job.kind == kind)
+        if tenant_id is not None:
+            from sqlalchemy import String, cast, func
+            from rasta_platform.models import Case
+
+            q = q.join(Case, func.replace(Job.payload["case_id"].as_string(), "-", "")
+                       == func.replace(cast(Case.id, String), "-", ""))
+            q = q.where(Case.tenant_id == UUID(str(tenant_id)))
         rows = s.execute(q.order_by(Job.created_at.desc(), Job.id).limit(min(limit, 100))).scalars().all()
         return [snapshot(j) for j in rows]
 
@@ -130,27 +142,38 @@ def public_view(job: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Helpers for teammates
 # ---------------------------------------------------------------------------
-def start_case_processing(case_id: str) -> Dict[str, Any]:
-    """Member 1: call after a case is submitted. Enqueues a process_case job (the worker
-    runs the agent). The dedupe key uses the case's submission_count, so submitting
-    twice enqueues once; the agent also refuses to run a case twice at the same time."""
-    marker: Any = None
-    try:
-        marker = platform_bridge.get_case(case_id).get("submission_count")
-    except Exception:
-        pass
-    if marker is None:  # TODO(M1): add submission_count to the case; the timestamp is the fallback
+def start_case_processing(case_id: str, generation: int | None = None, *, db: Session | None = None) -> Dict[str, Any]:
+    """Queue one process_case job for the submitted generation.
+
+    Pass the platform session to commit the job together with the submission.
+    """
+    marker: Any = generation
+    if marker is None:
+        try:
+            marker = platform_bridge.get_case(case_id).get("submission_count")
+        except Exception:
+            if platform_bridge.is_live():
+                raise
+    if marker is None:
+        if platform_bridge.is_live():
+            raise ValueError("A live processing job requires a submission generation")
         marker = f"t{int(time.time())}"
-    return enqueue("process_case", {"case_id": case_id}, dedupe_key=f"process-{case_id}-{marker}")
+    payload = {"case_id": case_id}
+    if isinstance(marker, int):
+        payload["generation"] = marker
+    return enqueue("process_case", payload, dedupe_key=f"process-{case_id}-{marker}", db=db)
 
 
-def enqueue_disbursement(case_id: str) -> Dict[str, Any]:
+def enqueue_disbursement(case_id: str, *, db: Session | None = None) -> Dict[str, Any]:
     """One disbursement job per case, ever (dedupe key "disburse-<case_id>"). The job only
     pays a case an officer has approved; anything else fails without retry."""
-    return enqueue("disburse_case", {"case_id": case_id}, dedupe_key=f"disburse-{case_id}")
+    return enqueue("disburse_case", {"case_id": case_id}, dedupe_key=f"disburse-{case_id}", db=db)
 
 
 def enqueue_notification(case_id: str, recipient: str, message: str,
-                         dedupe_key: Optional[str] = None) -> Dict[str, Any]:
-    return enqueue("send_notification", {"case_id": case_id, "recipient": recipient, "message": message},
-                   dedupe_key=dedupe_key)
+                         dedupe_key: Optional[str] = None, *, db: Session | None = None,
+                         notification_id: str | None = None) -> Dict[str, Any]:
+    payload = {"case_id": case_id, "recipient": recipient, "message": message}
+    if notification_id is not None:
+        payload["notification_id"] = notification_id
+    return enqueue("send_notification", payload, dedupe_key=dedupe_key, db=db)

@@ -125,6 +125,7 @@ def _finish_run(run_id: str, status: str, error: Optional[str]) -> Dict[str, Any
 class Ctx:
     run_id: str
     case_id: str
+    generation: Optional[int] = None
     case: Dict[str, Any] = field(default_factory=dict)
     steps: List[Dict[str, Any]] = field(default_factory=list)
     results: Dict[str, Any] = field(default_factory=dict)
@@ -166,6 +167,11 @@ async def _record(ctx: Ctx, name: str, status: str, output: Dict[str, Any], star
 
 async def _step(ctx: Ctx, name: str, fn, *args, **kwargs) -> Dict[str, Any]:
     started, started_at = time.perf_counter(), datetime.now(timezone.utc).isoformat()
+    if platform_bridge.is_live() and name in {
+        "verify_mock_identity", "match_identity_name", "analyze_document", "check_scam_message",
+        "find_duplicate_claims", "evaluate_route", "explain",
+    }:
+        await asyncio.to_thread(platform_bridge.live_call, "check_processing", ctx.case_id, ctx.generation)
     try:
         out = await fn(*args, **kwargs)
     except Exception as exc:  # a crashing tool is an unavailable tool, never a pass
@@ -227,9 +233,17 @@ async def _finalize(ctx: Ctx, route: str, *, confidence=None, risk_score=None, r
         "flags": list(ctx.flags), "missing_evidence": list(ctx.missing), "code": code,
         "auditor_trace": _jsonable(trace), "decided_by": "agent", "run_id": ctx.run_id,
     }
+    if platform_bridge.is_live():
+        tried = [s["step"] for s in ctx.steps if s["status"] != "skipped"]
+        packet = notes.build_officer_packet(case, ctx.results, ctx.flags, ctx.overrides, tried, reason)
+        decision.update(generation=ctx.generation, officer_note=notes.render_packet(packet))
     rec = await _step(ctx, "record_decision", tools.record_decision, ctx.case_id, decision)
     if rec.get("status") != "ok":
         raise RuntimeError(f"decision could not be recorded: {rec.get('error')}")
+
+    if platform_bridge.is_live():
+        ctx.final_status = rec["decision"]["route"]
+        return
 
     tried = [s["step"] for s in ctx.steps if s["status"] not in ("skipped",)]
     if route == "needs_proof":
@@ -270,15 +284,21 @@ async def _pipeline(ctx: Ctx) -> None:
         ctx.final_status, ctx.error = "failed", got.get("error")
         return
     case = ctx.case = got["case"]
-    if got["case_status"] != "submitted":
+    valid_statuses = ("submitted", "processing") if platform_bridge.is_live() else ("submitted",)
+    if got["case_status"] not in valid_statuses or (
+        ctx.generation is not None and case.get("submission_count") != ctx.generation
+    ):
         await _skip(ctx, "process_case", f"case status is '{got['case_status']}', not 'submitted'")
         ctx.final_status = "skipped"
         return
 
     async def go_processing():
         try:
-            await tools._bridge(platform_bridge.transition_case, ctx.case_id, "processing", "agent",
-                                "agent started automated checks")
+            if platform_bridge.is_live():
+                await tools._bridge(platform_bridge.live_call, "start_processing", ctx.case_id, ctx.generation)
+            else:
+                await tools._bridge(platform_bridge.transition_case, ctx.case_id, "processing", "agent",
+                                    "agent started automated checks")
         except Exception as exc:
             return tools._fail(exc, "could not move case to processing")
         return {"status": "ok", "to_status": "processing"}
@@ -402,9 +422,9 @@ async def _pipeline(ctx: Ctx) -> None:
         m2_trace=m2.get("auditor_trace") if m2_ok else None, reason=reason)
     # k) record_decision, l) route action and m) send_notification all run inside _finalize.
 
-async def execute_run(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+async def execute_run(snapshot: Dict[str, Any], generation: Optional[int] = None) -> Dict[str, Any]:
     """Runs the pipeline for an already-created run. Never raises."""
-    ctx = Ctx(run_id=snapshot["id"], case_id=snapshot["case_id"])
+    ctx = Ctx(run_id=snapshot["id"], case_id=snapshot["case_id"], generation=generation)
     status, error = "failed", None
     await _audit(ctx, "agent_run.started", {"triggered_by": snapshot.get("triggered_by")})
     try:
@@ -419,7 +439,12 @@ async def execute_run(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         # Never leave a case stuck in "processing": hand it to an officer.
         try:
             current = await asyncio.to_thread(platform_bridge.get_case, ctx.case_id)
-            if tools.case_status(current) == "processing":
+            if platform_bridge.is_live():
+                if status == "failed":
+                    packet = notes.build_error_packet(current, error or "Processing failed", [s["step"] for s in ctx.steps])
+                    await asyncio.to_thread(platform_bridge.live_call, "stop_processing", ctx.case_id,
+                                            ctx.generation, notes.render_packet(packet))
+            elif tools.case_status(current) == "processing":
                 error = error or "run ended while the case was still processing"
                 packet = notes.build_error_packet(current, error, [s["step"] for s in ctx.steps])
                 await asyncio.to_thread(platform_bridge.transition_case, ctx.case_id, "human_review",
@@ -433,10 +458,10 @@ async def execute_run(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     return done
 
 
-async def process_case(case_id: str, triggered_by: str = "system") -> Dict[str, Any]:
+async def process_case(case_id: str, triggered_by: str = "system", generation: Optional[int] = None) -> Dict[str, Any]:
     """Process one case and wait for the result. If a run for the case is already
     running, return that run instead of starting another."""
     snapshot, created = await asyncio.to_thread(create_or_get_run, case_id, triggered_by)
     if not created:
         return snapshot
-    return await execute_run(snapshot)
+    return await execute_run(snapshot, generation)

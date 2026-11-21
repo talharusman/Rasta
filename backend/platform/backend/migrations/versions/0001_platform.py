@@ -1,6 +1,6 @@
 """Initial platform schema, manually authored; never run on application startup."""
 from alembic import op
-from app.models import Base
+from migrations.platform_0001 import Base
 revision='0001'
 down_revision=None
 branch_labels=None

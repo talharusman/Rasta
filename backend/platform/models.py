@@ -48,6 +48,7 @@ class Case(Record):
     idempotency_key: Mapped[str] = mapped_column(String(200))
     request_hash: Mapped[str] = mapped_column(String(64))
     required_documents: Mapped[list] = mapped_column(JSONB, default=list)
+    approved_amount: Mapped[int | None] = mapped_column(Integer)
     final_outcome: Mapped[str | None] = mapped_column(String(24))
     __table_args__ = (UniqueConstraint('tenant_id', 'created_by', 'idempotency_key'),)
 
@@ -70,7 +71,8 @@ class Rule(Record):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     __table_args__ = (
         UniqueConstraint('tenant_id', 'policy_id', 'version'),
-        Index('one_active_policy', 'tenant_id', 'policy_id', unique=True, postgresql_where=active.is_(True))
+        Index('one_active_policy', 'tenant_id', 'policy_id', unique=True,
+              postgresql_where=active.is_(True), sqlite_where=active.is_(True))
     )
 
 
@@ -116,9 +118,10 @@ class Document(Record):
 
 
 class Job(Record):
-    __tablename__ = 'jobs'
+    __tablename__ = 'platform_processing_jobs'
     case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('cases.id'), index=True)
     generation: Mapped[int] = mapped_column(Integer)
+    submission_revision: Mapped[int | None] = mapped_column(Integer)
     state: Mapped[str] = mapped_column(String(24), default='queued')
     rule_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('rules.id'))
     error: Mapped[str | None] = mapped_column(Text)
@@ -138,4 +141,5 @@ class Notification(Record):
     message: Mapped[str] = mapped_column(Text)
     delivery_state: Mapped[str] = mapped_column(String(24), default='queued')
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    provider_message_id: Mapped[str | None] = mapped_column(String(80))
     deduplication_key: Mapped[str] = mapped_column(String(200), unique=True)

@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional, Set
 from fastapi import APIRouter, Body, Header
 from fastapi.responses import JSONResponse
 
-from . import orchestrator
+from . import orchestrator, platform_bridge
 
 logger = logging.getLogger("m3.agent.router")
 
@@ -78,6 +78,15 @@ async def process_case_route(payload: Optional[Dict[str, Any]] = Body(default=No
     case_id = (payload or {}).get("case_id")
     if not isinstance(case_id, str) or not case_id.strip():
         return _error(422, "VALIDATION_ERROR", "case_id (string) is required")
+    if platform_bridge.is_live():
+        from app.jobs.queue import start_case_processing
+
+        case = await asyncio.to_thread(platform_bridge.get_case, case_id.strip())
+        if case["status"] not in ("submitted", "processing"):
+            return _error(409, "INVALID_TRANSITION", "Case is not ready for processing")
+        job = await asyncio.to_thread(start_case_processing, case["id"], case["submission_count"])
+        return JSONResponse({"run_id": job["id"], "status": job["status"],
+                             "already_running": job["deduplicated"]}, status_code=202)
     snapshot, created = await asyncio.to_thread(orchestrator.create_or_get_run, case_id.strip(), "internal-api")
     if created:
         _spawn(snapshot)
@@ -91,6 +100,17 @@ async def get_run_route(run_id: str, x_service_key: Optional[str] = Header(None)
     if denied:
         return denied
     run = await asyncio.to_thread(orchestrator.load_run, run_id)
+    if run is None and platform_bridge.is_live():
+        from app.jobs.queue import get_job
+
+        job = await asyncio.to_thread(get_job, run_id)
+        if job and job["kind"] == "process_case":
+            agent_run_id = job["payload"].get("agent_run_id")
+            if agent_run_id:
+                run = await asyncio.to_thread(orchestrator.load_run, agent_run_id)
+            if run is None:
+                return {"id": run_id, "case_id": job["payload"]["case_id"], "status": job["status"], "steps": []}
+            return {**run, "id": run_id, "agent_run_id": agent_run_id}
     if run is None:
         return _error(404, "VALIDATION_ERROR", "run not found")
     return run

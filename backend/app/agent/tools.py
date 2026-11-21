@@ -113,6 +113,8 @@ async def analyze_document(case: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "skipped", "reason": "no_documents"}
     qualities, analyzed = [], []
     for doc in documents:
+        if platform_bridge.is_live():
+            await _bridge(platform_bridge.live_call, "check_processing", case["id"], case["submission_count"])
         res = await ai_client.extract_document({"case_id": case.get("id"), "document": doc})
         if res.get("status") != "ok" or not isinstance(res.get("quality"), (int, float)):
             return {"status": res.get("status") if res.get("status") != "ok" else "malformed",
@@ -149,7 +151,10 @@ async def find_duplicate_claims(case: Dict[str, Any]) -> Dict[str, Any]:
 
 async def evaluate_eligibility(case: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        rules = await _bridge(platform_bridge.get_active_rules)
+        if platform_bridge.is_live():
+            rules = await _bridge(platform_bridge.get_active_rules, case['id'], case['submission_count'])
+        else:
+            rules = await _bridge(platform_bridge.get_active_rules)
         result = await _bridge(platform_bridge.evaluate_rules, case, rules)
     except Exception as exc:
         return _fail(exc, "rule evaluation failed")
@@ -209,10 +214,10 @@ async def escalate_to_officer(case_id: str, packet: Dict[str, Any]) -> Dict[str,
 
 async def record_decision(case_id: str, decision: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        await _bridge(platform_bridge.record_decision, case_id, decision)
+        persisted = await _bridge(platform_bridge.record_decision, case_id, decision)
     except Exception as exc:
         return _fail(exc, "could not record decision")
-    return {"status": "ok", "route": decision.get("route")}
+    return {"status": "ok", "route": decision.get("route"), "decision": persisted}
 
 
 async def send_notification(case: Dict[str, Any], message: str) -> Dict[str, Any]:

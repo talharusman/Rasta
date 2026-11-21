@@ -1,6 +1,6 @@
 # OWNER: Member 3
 # Mock SMS adapter. Native dlr: ACCEPTD | DELIVRD | UNDELIV. No real SMS is sent.
-# send() is attempted ONCE (a retry could text the citizen twice); status() is a safe read.
+# The integrated worker supplies a stable key for each send or resend.
 import os
 from typing import Optional
 
@@ -58,11 +58,12 @@ class MockSmsNotificationProvider:
             )
         )
 
-    async def send(self, recipient: str, message: str, case_id: str) -> NotificationResult:
+    async def send(self, recipient: str, message: str, case_id: str, *, idempotency_key: str | None = None) -> NotificationResult:
         try:
             outcome = await self.http.request(
                 "POST", "/mock/sms/send",
                 json_body={"to": recipient, "text": message, "ref": case_id},
+                headers={"Idempotency-Key": idempotency_key} if idempotency_key else None,
                 safe=False, case_id=case_id)
             return _normalize(outcome)
         except Exception as exc:

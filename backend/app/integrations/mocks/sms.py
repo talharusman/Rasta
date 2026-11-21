@@ -4,9 +4,11 @@
 import uuid
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from shared.db import get_db
@@ -31,8 +33,20 @@ class SendRequest(BaseModel):
 
 
 @router.post("/send")
-def send(body: SendRequest, cond: Dict[str, Any] = Depends(guard), db: Session = Depends(get_db)):
+def send(body: SendRequest, cond: Dict[str, Any] = Depends(guard), db: Session = Depends(get_db),
+         idempotency_key: str | None = Header(default=None, max_length=128)):
+    def existing():
+        return db.scalar(select(MockSmsMessage).where(MockSmsMessage.idempotency_key == idempotency_key))
+
+    def replay(message):
+        if (message.to_number, message.text, message.ref) != (body.to, body.text, body.ref):
+            return JSONResponse(_error(409, "IDEMPOTENCY_CONFLICT"), status_code=409)
+        return {"msg_id": message.msg_id, "dlr": "ACCEPTD"}
+
+    if idempotency_key and (message := existing()) is not None:
+        return replay(message)
     msg = MockSmsMessage(
+        idempotency_key=idempotency_key,
         msg_id="SMS-" + uuid.uuid4().hex[:12].upper(),
         to_number=body.to,
         text=body.text,
@@ -41,7 +55,13 @@ def send(body: SendRequest, cond: Dict[str, Any] = Depends(guard), db: Session =
         dlr="UNDELIV" if cond["sms_failure"] else "DELIVRD",
     )
     db.add(msg)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if idempotency_key and (message := existing()) is not None:
+            return replay(message)
+        raise
     return {"msg_id": msg.msg_id, "dlr": "ACCEPTD"}
 
 

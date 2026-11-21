@@ -9,20 +9,22 @@ from typing import Literal
 from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.routing import APIRoute
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import func, or_, select
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response as StarletteResponse
 
 from .models import (
     Audit, Case, Citizen, Consent, Decision, Document,
-    History, Job, Rule, ScamCheck, User, now
+    History, Job, Notification, Rule, ScamCheck, User, now
 )
+from app.jobs.queue import enqueue_disbursement, start_case_processing
+from .integration import notify_review, payment_summary
 from .services import (
     Actor, Assign, CaseRef, ClaimData, Close, CreateCase, DB,
-    EditCase, Grant, Login, Problem, Publish, Refresh, Result,
+    EditCase, Grant, Login, Problem, Publish, Refresh,
     Review, Revision, RoleEdit, Scam, Service, active_rule, audit, auth_call,
     case_access, change, citizen_access, detail, dump, evaluate,
-    factory, fail, get_resource, locked_run, processing, verify_revision,
+    factory, fail, get_resource, processing, verify_revision,
     roles, settings
 )
 
@@ -77,19 +79,6 @@ P = '/api/v1'
 @router.get('/api/platform/health', tags=['platform'])
 def platform_health():
     return {"service": "platform", "status": "ok"}
-
-
-@router.get('/health', tags=['platform'])
-def health():
-    return {'status': 'ok', 'prototype': True}
-
-
-@router.get('/ready', tags=['platform'])
-def ready(session: DB):
-    session.execute(text('SELECT 1'))
-    if not settings.supabase_url or not settings.supabase_publishable_key:
-        fail(503, 'SERVICE_UNAVAILABLE', 'Auth is not configured')
-    return {'status': 'ready', 'ai_configured': bool(settings.ai_base_url)}
 
 
 # --- Authentication & User Identity ---
@@ -160,7 +149,10 @@ def citizens(user: Actor, session: DB):
 @router.post(P + '/cases', status_code=201, tags=['cases'])
 def create_case(body: CreateCase, request: Request, user: Actor, session: DB):
     citizen_access(session, user, body.citizen_id, 'case:write')
-    hashed = hashlib.sha256(json.dumps(body.model_dump(mode='json'), sort_keys=True).encode()).hexdigest()
+    claim = body.model_dump(mode='json')
+    if claim['data']['citizen_phone'] is None:
+        del claim['data']['citizen_phone']
+    hashed = hashlib.sha256(json.dumps(claim, sort_keys=True).encode()).hexdigest()
     old = session.scalar(
         select(Case).where(
             Case.tenant_id == user.tenant_id,
@@ -211,6 +203,8 @@ def list_cases(
             select(Citizen.id).where(Citizen.user_id == user.id, Citizen.tenant_id == user.tenant_id)
         ))
     elif user.role == 'helper':
+        if citizen_id:
+            citizen_access(session, user, citizen_id, 'case:read')
         query = query.where(Case.citizen_id.in_(
             select(Consent.citizen_id).where(
                 Consent.tenant_id == user.tenant_id,
@@ -230,7 +224,8 @@ def list_cases(
         query = query.where(Case.citizen_id == citizen_id)
     return {
         'items': [
-            detail(session, c) for c in session.scalars(
+            {**detail(session, c), 'payment': payment_summary(session, c) if c.approved_amount else None}
+            for c in session.scalars(
                 query.order_by(Case.created_at.desc(), Case.id).limit(limit).offset(offset)
             )
         ]
@@ -251,7 +246,7 @@ def review_queue(user: Actor, session: DB, limit: int = Query(20, ge=1, le=100),
                 'priority': c.priority,
                 'revision': c.revision,
                 'assigned_officer_id': c.assigned_officer_id,
-                'created_at': c.created_at
+                'created_at': c.created_at,
             }
             for c in session.scalars(query.order_by(Case.priority.desc(), Case.created_at, Case.id).limit(limit).offset(offset))
         ]
@@ -260,7 +255,8 @@ def review_queue(user: Actor, session: DB, limit: int = Query(20, ge=1, le=100),
 
 @router.get(P + '/cases/{identifier}', tags=['cases'])
 def get_case(identifier: uuid.UUID, user: Actor, session: DB):
-    return detail(session, case_access(session, user, identifier))
+    case = case_access(session, user, identifier)
+    return {**detail(session, case), 'payment': payment_summary(session, case)}
 
 
 @router.patch(P + '/cases/{identifier}', tags=['cases'])
@@ -279,9 +275,16 @@ def edit_case(identifier: uuid.UUID, body: EditCase, request: Request, user: Act
 def submit(identifier: uuid.UUID, body: Revision, request: Request, user: Actor, session: DB):
     roles(user, 'citizen', 'helper')
     case = case_access(session, user, identifier, 'case:submit', True)
-    if case.status in ('submitted', 'processing') and body.expected_revision == case.revision - 1:
-        job = session.scalar(select(Job).where(Job.case_id == case.id, Job.generation == case.processing_generation))
-        return {'case_id': case.id, 'status': case.status, 'revision': case.revision, 'run_id': job.id if job else None}
+    if case.processing_generation:
+        job = session.scalar(select(Job).where(
+            Job.case_id == case.id, Job.generation == case.processing_generation,
+        ))
+        if job is not None and (
+            job.submission_revision == body.expected_revision
+            or (job.submission_revision is None and case.status == 'submitted'
+                and body.expected_revision == case.revision - 1)
+        ):
+            return {'case_id': case.id, 'status': case.status, 'revision': case.revision, 'run_id': job.id}
     verify_revision(case, body.expected_revision)
     if case.status not in ('draft', 'needs_proof'):
         fail(409, 'INVALID_TRANSITION', 'Case cannot be submitted')
@@ -289,9 +292,11 @@ def submit(identifier: uuid.UUID, body: Revision, request: Request, user: Actor,
     ClaimData.model_validate(case.data)
     case.processing_generation += 1
     change(session, request, case, 'submitted', action='case_submitted')
-    job = Job(tenant_id=user.tenant_id, case_id=case.id, generation=case.processing_generation)
+    job = Job(tenant_id=user.tenant_id, case_id=case.id, generation=case.processing_generation,
+              submission_revision=body.expected_revision)
     session.add(job)
     session.flush()
+    start_case_processing(str(case.id), case.processing_generation, db=session)
     return {'case_id': case.id, 'status': case.status, 'revision': case.revision, 'run_id': job.id}
 
 
@@ -319,6 +324,8 @@ def review(identifier: uuid.UUID, body: Review, request: Request, user: Actor, s
     roles(user, 'officer', 'admin')
     case = case_access(session, user, identifier, 'case:write', True)
     verify_revision(case, body.expected_revision)
+    if case.status in ('approved', 'rejected', 'closed'):
+        fail(409, 'VALIDATION_ERROR', f'Case is already {case.status}')
     if case.status not in ('cleared', 'human_review'):
         fail(409, 'INVALID_TRANSITION')
     if user.role == 'admin' and not body.override_reason:
@@ -345,7 +352,14 @@ def review(identifier: uuid.UUID, body: Review, request: Request, user: Actor, s
     change(session, request, case, status, body.notes, 'officer_' + body.action)
     if body.override_reason:
         audit(session, request, 'admin_override', case.id, {'reason': body.override_reason})
-    return detail(session, case)
+    if status == 'approved':
+        case.approved_amount = settings.demo_payout_amount
+        enqueue_disbursement(str(case.id), db=session)
+    else:
+        message = ('Your application needs additional documents.' if status == 'needs_proof'
+                   else 'Your application was not approved. See the case for details.')
+        notify_review(session, case, message)
+    return {**detail(session, case), 'payment': payment_summary(session, case)}
 
 
 @router.post(P + '/cases/{identifier}/close', tags=['cases'])
@@ -355,6 +369,9 @@ def close(identifier: uuid.UUID, body: Close, request: Request, user: Actor, ses
     verify_revision(case, body.expected_revision)
     if case.status not in ('approved', 'rejected'):
         fail(409, 'INVALID_TRANSITION')
+    payment = payment_summary(session, case) if case.status == 'approved' else None
+    if payment and payment['status'] in ('queued', 'pending'):
+        fail(409, 'INVALID_TRANSITION', 'Payment must settle before closing this case')
     change(session, request, case, 'closed', body.notes, 'case_closed')
     return detail(session, case)
 
@@ -362,13 +379,15 @@ def close(identifier: uuid.UUID, body: Close, request: Request, user: Actor, ses
 @router.get(P + '/cases/{identifier}/history', tags=['cases'])
 def history(identifier: uuid.UUID, user: Actor, session: DB):
     case_access(session, user, identifier)
-    return {
-        'items': [
-            dump(h) for h in session.scalars(
-                select(History).where(History.case_id == identifier).order_by(History.created_at, History.id)
-            )
-        ]
-    }
+    rows = session.scalars(select(History).where(History.case_id == identifier)
+                           .order_by(History.created_at, History.id))
+    items = []
+    for row in rows:
+        item = dump(row)
+        if user.role in ('citizen', 'helper') and row.action in ('decision_recorded', 'agent_failed'):
+            item['notes'] = ''
+        items.append(item)
+    return {'items': items}
 
 
 # --- Documents ---
@@ -481,12 +500,12 @@ def withdraw(identifier: uuid.UUID, request: Request, user: Actor, session: DB):
     if consent.revoked_at is None:
         consent.revoked_at = now()
         audit(session, request, 'consent_withdrawn', consent.id)
-        if consent.purpose == 'processing':
+        if consent.purpose == 'processing' or consent.scope == 'case:submit':
+            affected = [Case.citizen_id == consent.citizen_id, Case.status.in_(['submitted', 'processing'])]
+            if consent.purpose != 'processing':
+                affected.append(Case.helper_id == consent.grantee_id)
             for case in session.scalars(
-                select(Case).where(
-                    Case.citizen_id == consent.citizen_id,
-                    Case.status.in_(['submitted', 'processing'])
-                ).order_by(Case.id).with_for_update()
+                select(Case).where(*affected).order_by(Case.id).with_for_update()
             ):
                 change(session, request, case, 'human_review', 'Processing consent withdrawn', 'processing_blocked')
                 for job in session.scalars(
@@ -602,14 +621,51 @@ def audit_logs(
 @router.get(P + '/cases/{identifier}/decision-trace', tags=['audit'])
 def trace(identifier: uuid.UUID, user: Actor, session: DB, decision_id: uuid.UUID | None = None):
     roles(user, 'admin', 'auditor', 'officer')
-    case_access(session, user, identifier)
+    case = case_access(session, user, identifier)
     query = select(Decision).where(Decision.case_id == identifier, Decision.tenant_id == user.tenant_id)
     if decision_id:
         query = query.where(Decision.id == decision_id)
-    dec = session.scalar(query.order_by(Decision.created_at.desc()))
-    if not dec:
+    decisions = list(session.scalars(query.order_by(Decision.created_at.desc())))
+    if not decisions:
         fail(404, 'NOT_FOUND', 'No decision available')
-    return dump(dec)
+    latest_decision = decisions[0]
+
+    dec_list = []
+    for d in decisions:
+        d_dict = dump(d)
+        rule = session.get(Rule, d.rule_version_id)
+        if rule:
+            d_dict['rule_version'] = rule.version
+            d_dict['rule_name'] = rule.rule_name
+        dec_list.append(d_dict)
+
+    history_list = [
+        dump(h) for h in session.scalars(
+            select(History).where(History.case_id == identifier).order_by(History.created_at.asc())
+        )
+    ]
+
+    audit_list = [
+        dump(a) for a in session.scalars(
+            select(Audit).where(
+                Audit.tenant_id == user.tenant_id,
+                Audit.resource.contains(str(identifier))
+            ).order_by(Audit.created_at.asc())
+        )
+    ]
+
+    res = dump(latest_decision)
+    rule = session.get(Rule, latest_decision.rule_version_id)
+    if rule:
+        res['rule_version'] = rule.version
+        res['rule_name'] = rule.rule_name
+    res['case_id'] = identifier
+    res['case_status'] = case.status
+    res['final_outcome'] = case.final_outcome
+    res['decisions'] = dec_list
+    res['history'] = history_list
+    res['audit_logs'] = audit_list
+    return res
 
 
 @router.post(P + '/scam-checks', status_code=201, tags=['scam'])
@@ -648,97 +704,16 @@ def metrics(user: Actor, session: DB):
     return {'cases_by_status': dict(counts), 'total_cases': sum(count for _, count in counts)}
 
 
-# --- Worker / Internal Service Integration ---
-@router.get('/internal/jobs', tags=['internal'])
-def jobs(service: Service, session: DB, limit: int = Query(20, ge=1, le=100)):
-    return {
-        'items': [
-            dump(j) for j in session.scalars(
-                select(Job).where(Job.state == 'queued').order_by(Job.created_at).limit(limit)
-            )
-        ]
-    }
+# --- Notifications ---
+@router.get(P + '/notifications', tags=['notifications'])
+def notifications(user: Actor, session: DB):
+    rows = session.scalars(select(Notification).where(
+        Notification.tenant_id == user.tenant_id, Notification.recipient_id == user.id,
+    ).order_by(Notification.created_at.desc()).limit(50))
+    return {'items': [dump(row, ('deduplication_key', 'provider_message_id')) for row in rows]}
 
 
-@router.post('/internal/jobs/{identifier}/start', tags=['internal'])
-def start_job(identifier: uuid.UUID, request: Request, service: Service, session: DB):
-    job, case, citizen = locked_run(session, identifier)
-    request.state.tenant_id = case.tenant_id
-    if job.generation != case.processing_generation or case.status not in ('submitted', 'processing'):
-        fail(409, 'CASE_VERSION_CONFLICT', 'Job no longer current')
-    processing(session, citizen)
-    if job.state == 'queued':
-        rule = active_rule(session, case.tenant_id)
-        job.rule_version_id = rule.id
-        job.state = 'processing'
-        change(session, request, case, 'processing', action='agent_started')
-        audit(session, request, 'agent_started', case.id, actor_type='agent')
-    elif job.state != 'processing':
-        fail(409, 'CONFLICT', 'Run is not executable')
-    rule = get_resource(session, Rule, job.rule_version_id, case.tenant_id)
-    return {'run': dump(job), 'case': detail(session, case), 'rule': dump(rule), 'citizen': dump(citizen)}
-
-
-@router.post('/internal/jobs/{identifier}/decision', tags=['internal'])
-def record_decision(identifier: uuid.UUID, body: Result, request: Request, service: Service, session: DB):
-    job, case, citizen = locked_run(session, identifier)
-    request.state.tenant_id = case.tenant_id
-    processing(session, citizen)
-    old = session.scalar(
-        select(Decision).where(Decision.case_id == case.id, Decision.processing_generation == job.generation)
-    )
-    if old:
-        if old.payload.get('submitted_result') != body.model_dump(mode='json'):
-            fail(409, 'IDEMPOTENCY_CONFLICT', 'Different result already recorded')
-        return dump(old)
-    if job.generation != case.processing_generation or job.state != 'processing' or case.status != 'processing':
-        fail(409, 'CASE_VERSION_CONFLICT')
-    rule = get_resource(session, Rule, job.rule_version_id, case.tenant_id)
-    if body.rule_version != rule.version:
-        fail(409, 'RULE_VERSION_CONFLICT')
-    route, missing = evaluate(session, case, rule, body.confidence, body.flags, body.identity_verified)
-    rank = {'cleared': 0, 'needs_proof': 1, 'human_review': 2}
-    if rank[body.route] > rank[route]:
-        route = body.route
-    payload = body.model_dump(mode='json')
-    payload['submitted_result'] = body.model_dump(mode='json')
-    payload['route'] = route
-    if route != body.route:
-        payload['user_explanation'] = 'Additional review or evidence is required by platform policy.'
-    decision = Decision(
-        tenant_id=case.tenant_id,
-        case_id=case.id,
-        processing_generation=job.generation,
-        rule_version_id=rule.id,
-        payload=payload
-    )
-    session.add(decision)
-    case.required_documents = missing
-    job.state = 'completed'
-    change(session, request, case, route, action='decision_recorded')
-    audit(
-        session, request, 'ai_decision', case.id,
-        {'run_id': str(job.id), 'rule_version': rule.version},
-        actor_type='ai'
-    )
-    session.flush()
-    return dump(decision)
-
-
-@router.post('/internal/jobs/{identifier}/fail', tags=['internal'])
-def fail_job(identifier: uuid.UUID, request: Request, service: Service, session: DB):
-    job, case, citizen = locked_run(session, identifier)
-    request.state.tenant_id = case.tenant_id
-    if job.state in ('completed', 'blocked', 'failed'):
-        return dump(job)
-    job.state = 'failed'
-    job.error = 'SERVICE_UNAVAILABLE'
-    if job.generation == case.processing_generation and case.status in ('submitted', 'processing'):
-        change(session, request, case, 'human_review', 'Processing service unavailable', 'agent_failed')
-    audit(session, request, 'agent_failed', case.id, actor_type='agent')
-    return dump(job)
-
-
+# --- Internal Service Integration ---
 @router.get('/internal/cases/{identifier}/payment-authorization', tags=['internal'])
 def payment_authorization(identifier: uuid.UUID, service: Service, session: DB):
     case = session.get(Case, identifier)
@@ -746,6 +721,6 @@ def payment_authorization(identifier: uuid.UUID, service: Service, session: DB):
         fail(404, 'NOT_FOUND')
     return {
         'case_id': case.id,
-        'approved': case.final_outcome == 'approved' and case.status in ('approved', 'closed'),
+        'approved': case.final_outcome == 'approved' and case.status == 'approved',
         'prototype': True
     }

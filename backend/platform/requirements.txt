@@ -1,4 +1,4 @@
-fastapi
+fastapi>=0.121
 uvicorn[standard]
 sqlalchemy>=2.0,<3
 psycopg[binary]>=3.2,<4
@@ -10,4 +10,5 @@ python-multipart>=0.0.20
 python-dotenv>=1.0
 alembic>=1.14,<2
 pytest>=8
+pytest-asyncio>=0.23
 httpx>=0.28,<1

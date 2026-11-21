@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from shared.db import get_db
+from app.agent import platform_bridge
 
 from .control import MockRoute, MockServiceError, make_guard
 from .models import MockAccount, MockTransaction
@@ -109,6 +110,16 @@ def disburse(
     existing = _by_key(db, idempotency_key)
     if existing is not None:
         return replay_or_conflict(existing)
+
+    if platform_bridge.is_live():
+        try:
+            case = platform_bridge.get_case(body.case_id)
+        except (ValueError, KeyError):
+            raise MockServiceError(403, _rjct("NOT_APPROVED")) from None
+        if (case["status"] != "approved" or case["approved_amount"] != amount
+                or case["account_id"] != body.acct or body.approval_ref != body.case_id
+                or idempotency_key != f"disburse-{body.case_id}"):
+            raise MockServiceError(403, _rjct("NOT_APPROVED"))
 
     if db.get(MockAccount, body.acct) is None:
         return JSONResponse(_rjct("ACCOUNT_NOT_FOUND", acct=body.acct, amt=float(amount)), status_code=422)

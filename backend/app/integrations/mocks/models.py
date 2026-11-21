@@ -49,6 +49,7 @@ class MockTransaction(Base):
 class MockSmsMessage(Base):
     __tablename__ = "mock_sms_messages"
     msg_id = Column(String(40), primary_key=True)
+    idempotency_key = Column(String(128), unique=True, nullable=True)
     to_number = Column(String(32), nullable=False)
     text = Column(Text, nullable=False)
     ref = Column(String(64), nullable=True)

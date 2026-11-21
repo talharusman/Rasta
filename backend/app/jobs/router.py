@@ -61,10 +61,10 @@ def _auth(x_service_key: Optional[str]) -> Optional[JSONResponse]:
     return None
 
 
-def _list(status: Optional[str], kind: Optional[str]):
+def _list(status: Optional[str], kind: Optional[str], tenant_id=None):
     if status and status not in queue.STATUSES:
         return _error(422, "VALIDATION_ERROR", f"status must be one of {', '.join(queue.STATUSES)}")
-    return {"jobs": [queue.public_view(j) for j in queue.list_jobs(status, kind, 100)]}
+    return {"jobs": [queue.public_view(j) for j in queue.list_jobs(status, kind, 100, tenant_id)]}
 
 
 @router.post("/internal/jobs/notifications", status_code=202)
@@ -99,7 +99,7 @@ async def get_jobs(status: Optional[str] = None, kind: Optional[str] = None,
 @router.get("/api/v1/admin/jobs")
 async def admin_jobs(status: Optional[str] = None, kind: Optional[str] = None,
                      admin: Dict[str, str] = Depends(platform_bridge.require_admin)):
-    return await asyncio.to_thread(_list, status, kind)
+    return await asyncio.to_thread(_list, status, kind, admin.get("tenant_id"))
 
 
 @router.get("/health")
@@ -115,6 +115,10 @@ def _check_ready() -> Dict[str, Any]:
         checks["database"] = "ok"
     except Exception as exc:
         checks["database"] = f"error: {type(exc).__name__}"
+    if platform_bridge.is_live():
+        from rasta_platform.services import settings
+
+        checks["auth"] = "ok" if settings.supabase_url and settings.supabase_publishable_key else "unconfigured"
     if worker.worker_enabled():
         try:
             age = worker.heartbeat_age_seconds()

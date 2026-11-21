@@ -228,19 +228,19 @@ export async function apiHealth(): Promise<{
 }
 
 // Backend platform methods
-export async function fetchBackendCases(citizenId?: string): Promise<any[]> {
+export async function fetchBackendCases(citizenId?: string): Promise<BackendCase[]> {
   const path = citizenId ? `/api/v1/cases?citizen_id=${citizenId}` : "/api/v1/cases";
-  const res = await request<{ items: any[] }>(path);
+  const res = await request<{ items: BackendCase[] }>(path);
   return res.items || [];
 }
 
-export async function fetchBackendReviewQueue(): Promise<any[]> {
-  const res = await request<{ items: any[] }>("/api/v1/cases/review-queue");
+export async function fetchBackendReviewQueue(): Promise<BackendReviewCase[]> {
+  const res = await request<{ items: BackendReviewCase[] }>("/api/v1/cases/review-queue");
   return res.items || [];
 }
 
 export async function fetchBackendCaseDetail(caseId: string): Promise<any> {
-  return request<any>(`/api/v1/cases/${caseId}`);
+  return request<BackendCase>(`/api/v1/cases/${caseId}`);
 }
 
 export async function createBackendCase(payload: {
@@ -253,9 +253,10 @@ export async function createBackendCase(payload: {
     monthly_income: number;
     household_size: number;
     payment_account: string;
+    citizen_phone?: string;
   };
 }): Promise<any> {
-  return request<any>("/api/v1/cases", {
+  return request<BackendCase>("/api/v1/cases", {
     method: "POST",
     body: JSON.stringify({
       claim_type: "relief_payment",
@@ -272,7 +273,7 @@ export async function submitBackendCase(caseId: string, expectedRevision: number
 }
 
 export async function assignBackendOfficer(caseId: string, officerId: string, expectedRevision: number, reason: string): Promise<any> {
-  return request<any>(`/api/v1/cases/${caseId}/assign`, {
+  return request<BackendCase>(`/api/v1/cases/${caseId}/assign`, {
     method: "POST",
     body: JSON.stringify({ officer_id: officerId, expected_revision: expectedRevision, reason }),
   });
@@ -286,7 +287,7 @@ export async function reviewBackendCase(
   requiredDocuments: string[] = [],
   overrideReason?: string
 ): Promise<any> {
-  return request<any>(`/api/v1/cases/${caseId}/review`, {
+  return request<BackendCase>(`/api/v1/cases/${caseId}/review`, {
     method: "POST",
     body: JSON.stringify({
       action,
@@ -409,4 +410,60 @@ export async function sendSms(phone: string, message: string): Promise<SmsSendRe
     method: "POST",
     body: JSON.stringify({ phone, message }),
   });
+}
+
+export type EvidenceType = "identity_proof" | "income_proof";
+
+export interface BackendCase {
+  case_id: string;
+  status: "draft" | "submitted" | "processing" | "cleared" | "needs_proof" | "human_review" | "approved" | "rejected" | "closed";
+  revision: number;
+  assigned_officer_id: string | null;
+  created_at: string;
+  claim_type: string;
+  user_explanation: string | null;
+  required_documents: EvidenceType[];
+  data: {
+    name: string;
+    mock_identity_id: string;
+    monthly_income: number;
+    household_size: number;
+    payment_account: string;
+    citizen_phone?: string | null;
+  };
+  documents: { type: EvidenceType; file_name?: string; sha256: string }[];
+  decision?: { route: string; confidence: number | null; identity_verified: boolean; rule_version: number; model_version: string | null };
+  payment?: { status: "queued" | "pending" | "confirmed" | "failed"; amount: number | null; transaction_id: string | null } | null;
+}
+
+export type BackendReviewCase = Pick<BackendCase, "case_id" | "status" | "revision" | "assigned_officer_id" | "created_at">;
+
+export async function fetchBackendCitizens() {
+  const result = await request<{ items: { id: string; name: string; mock_identity_id: string }[] }>("/api/v1/citizens");
+  return result.items;
+}
+
+export async function fetchBackendNotifications() {
+  const result = await request<{ items: { id: string; case_id: string; message: string; created_at: string; delivery_state: string }[] }>("/api/v1/notifications");
+  return result.items;
+}
+
+export async function uploadBackendEvidence(caseId: string, revision: number, type: EvidenceType, file: File) {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("type", type);
+  body.append("expected_revision", String(revision));
+  return request<{ revision: number }>(`/api/v1/cases/${caseId}/documents`, { method: "POST", body });
+}
+
+export async function fetchBackendHistory(caseId: string) {
+  return request<{ items: { id: string; action: string; notes: string; created_at: string }[] }>(
+    `/api/v1/cases/${caseId}/history`
+  );
+}
+
+export async function fetchBackendTrace(caseId: string) {
+  return request<{ rule_version: number; payload: { model_version?: string; reason?: string; flags?: string[] } }>(
+    `/api/v1/cases/${caseId}/decision-trace`
+  );
 }

@@ -7,8 +7,8 @@ from shared.config import DATABASE_URL
 
 # The engine does not connect until you really use it,
 # so the app starts even if Postgres is not running yet.
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine, autoflush=False)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 Base = declarative_base()
 
 

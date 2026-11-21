@@ -1,6 +1,6 @@
 // OWNER: Member 4
 // RASTA — Functional Frontend & Role-Aware Operations Platform
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import {
   Link,
@@ -16,6 +16,9 @@ import {
   type DemoAccount,
   apiHealth,
   demoAccounts,
+  fetchBackendHistory,
+  fetchBackendTrace,
+  type EvidenceType,
   requestAiDecision,
   verifyNadra,
 } from "./api";
@@ -944,7 +947,9 @@ function CitizenHome() {
               {latestCase.status === "Needs review"
                 ? "Your claim is currently being carefully reviewed by our Department Officer. No action is required from you."
                 : latestCase.status === "Verified"
-                ? `Approved! Rs 25,000 disbursed via Raast (${latestCase.paymentTxnId || "TXN-0001"}).`
+                ? paymentText(latestCase)
+                : latestCase.status === "Checks passed"
+                ? "Automated checks passed. An officer will review the application."
                 : latestCase.status === "More information"
                 ? "An officer has requested additional documentation. Please check your SMS notices."
                 : "Your claim has been registered in the system."}
@@ -1860,10 +1865,41 @@ function Cases({ detail = false }: { detail?: boolean }) {
 }
 
 // --- Case Detail with Live NADRA & Officer Actions ---
+function paymentText(record: CaseRecord) {
+  if (record.paymentTxnId) {
+    return `Simulated payment of Rs ${(record.paymentAmount ?? 0).toLocaleString()} confirmed (${record.paymentTxnId}).`;
+  }
+  if (record.paymentStatus === "failed") return "Case approved. Simulated payment failed.";
+  if (record.paymentStatus === "pending") return "Case approved. Waiting for payment confirmation.";
+  if (record.paymentStatus === "queued") return "Case approved. Simulated payment queued.";
+  return "Case approved.";
+}
+
+function EvidenceInputs({ evidence, onChange, required = [] }: {
+  evidence: Partial<Record<EvidenceType, File>>;
+  onChange: (files: Partial<Record<EvidenceType, File>>) => void;
+  required?: EvidenceType[];
+}) {
+  return <>{([
+    ["identity_proof", "Identity proof"], ["income_proof", "Income proof"],
+  ] as const).map(([type, label]) => (
+    <label key={type}>{label}{required.includes(type) ? " (requested)" : ""}
+      <input type="file" accept="image/jpeg,image/png,application/pdf"
+        onChange={(event) => {
+          const next = { ...evidence };
+          const file = event.target.files?.[0];
+          if (file) next[type] = file;
+          else delete next[type];
+          onChange(next);
+        }} />
+    </label>
+  ))}</>;
+}
+
 function CaseDetail() {
   const { caseId } = useParams();
   const { user } = useAuth();
-  const { getCase, officerAction } = useData();
+  const { getCase, officerAction, resumeCase, assignCase } = useData();
   const targetCase = getCase(caseId || "REL-20481");
 
   const [evidenceModal, setEvidenceModal] = useState(false);
@@ -1875,6 +1911,33 @@ function CaseDetail() {
   const [runningNadra, setRunningNadra] = useState(false);
   const [nadraResult, setNadraResult] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+
+  const [overrideReason, setOverrideReason] = useState("");
+  const [resubmitting, setResubmitting] = useState(false);
+  const [evidence, setEvidence] = useState<Partial<Record<EvidenceType, File>>>({});
+  const [reviewing, setReviewing] = useState(false);
+  const [liveHistory, setLiveHistory] = useState<{ caseId: string; revision: number; items: CaseRecord["timeline"] }>();
+  const [trace, setTrace] = useState<{ caseId: string; revision: number; rule: number; model?: string; reason?: string }>();
+  const revision = targetCase?.backendRevision;
+  const actorId = user?.id;
+  const canTrace = user?.role === "ADMIN" || user?.role === "AUDITOR"
+    || (user?.role === "OFFICER" && actorId === targetCase?.assignedOfficerId);
+
+  useEffect(() => {
+    if (revision == null || !caseId) return;
+    let cancelled = false;
+    void fetchBackendHistory(caseId).then(({ items }) => {
+      if (!cancelled) setLiveHistory({ caseId, revision, items: items.map((item) => ({
+        id: item.id, title: item.action.replace(/_/g, " "), time: new Date(item.created_at).toLocaleString(),
+        description: item.notes, type: "officer",
+      })) });
+    }).catch(() => { if (!cancelled) setLiveHistory(undefined); });
+    if (canTrace) void fetchBackendTrace(caseId).then((result) => {
+      if (!cancelled) setTrace({ caseId, revision, rule: result.rule_version, model: result.payload.model_version,
+        reason: result.payload.reason });
+    }).catch(() => { if (!cancelled) setTrace(undefined); });
+    return () => { cancelled = true; };
+  }, [actorId, caseId, revision, canTrace]);
 
   if (!targetCase) {
     return (
@@ -1889,6 +1952,64 @@ function CaseDetail() {
   }
 
   const isAuditor = user?.role === "AUDITOR";
+  const isLive = revision != null;
+  const canAssign = isLive && user?.role === "OFFICER" && !targetCase.assignedOfficerId
+    && (targetCase.backendStatus === "cleared" || targetCase.backendStatus === "human_review");
+  const canReview = !canAssign && (user?.role === "OFFICER" || user?.role === "ADMIN")
+    && (!isLive || targetCase.backendStatus === "cleared" || targetCase.backendStatus === "human_review");
+  const canResubmit = isLive && (user?.role === "CITIZEN" || user?.role === "HELPER")
+    && (targetCase.backendStatus === "needs_proof" || targetCase.backendStatus === "draft");
+  const timeline = isLive
+    ? liveHistory?.caseId === caseId && liveHistory?.revision === revision ? liveHistory?.items ?? [] : []
+    : targetCase.timeline;
+
+  const submitEvidence = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (resubmitting) return;
+    setResubmitting(true);
+    try {
+      await resumeCase(targetCase.id, evidence);
+      setEvidence({});
+      setActionNotice("Application submitted for processing.");
+    } catch (error) {
+      setActionNotice(error instanceof Error ? error.message : "Submission failed.");
+    } finally {
+      setResubmitting(false);
+    }
+  };
+
+  const review = async (action: "approve" | "reject" | "request_evidence", notes: string) => {
+    if (reviewing) return;
+    if (isLive && user?.role === "ADMIN" && !overrideReason.trim()) {
+      setActionNotice("Enter an admin override reason before reviewing.");
+      return;
+    }
+    setReviewing(true);
+    try {
+      const result = await officerAction(targetCase.id, action, notes, user?.name || "Officer", overrideReason.trim() || undefined);
+      if (!result.success) {
+        setActionNotice(result.note ?? "Review failed.");
+        return;
+      }
+      if (action === "approve") {
+        setApprovalModal(false);
+        setApprovalNote("");
+        setActionNotice(isLive ? "Case approved. Simulated payment queued."
+          : `Demo approval recorded${result.raastTxn ? ` (${result.raastTxn})` : ""}.`);
+      } else if (action === "reject") {
+        setRejectModal(false);
+        setRejectNote("");
+        setActionNotice("Case rejected.");
+      } else {
+        setEvidenceModal(false);
+        setEvidenceNote("");
+        setActionNotice("Additional evidence requested.");
+      }
+      setOverrideReason("");
+    } finally {
+      setReviewing(false);
+    }
+  };
 
   const handleLiveNadraCheck = async () => {
     setRunningNadra(true);
@@ -1909,49 +2030,17 @@ function CaseDetail() {
   const submitEvidenceRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!evidenceNote.trim()) return;
-    const res = await officerAction(
-      targetCase.id,
-      "request_evidence",
-      evidenceNote,
-      user?.name || "Officer"
-    );
-    setEvidenceModal(false);
-    setEvidenceNote("");
-    setActionNotice(
-      res.smsSent
-        ? "Evidence requested. Real SMS notification dispatched to citizen."
-        : "Evidence requested and logged in case timeline."
-    );
+    await review("request_evidence", evidenceNote);
   };
 
-  const submitApproval = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const res = await officerAction(
-      targetCase.id,
-      "approve",
-      approvalNote || "All eligibility criteria satisfied.",
-      user?.name || "Officer"
-    );
-    setApprovalModal(false);
-    setApprovalNote("");
-    setActionNotice(
-      `Case Approved! Disbursed Rs 25,000 via Raast (Transaction: ${
-        res.raastTxn || "TXN-0001"
-      }). SMS sent.`
-    );
+  const submitApproval = async (event: React.FormEvent) => {
+    event.preventDefault();
+    await review("approve", approvalNote || "All eligibility criteria satisfied.");
   };
 
-  const submitReject = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await officerAction(
-      targetCase.id,
-      "reject",
-      rejectNote || "Does not meet poverty criteria.",
-      user?.name || "Officer"
-    );
-    setRejectModal(false);
-    setRejectNote("");
-    setActionNotice("Case marked as Rejected and logged in audit trail.");
+  const submitReject = async (event: React.FormEvent) => {
+    event.preventDefault();
+    await review("reject", rejectNote || "Does not meet relief criteria.");
   };
 
   return (
@@ -2031,8 +2120,8 @@ function CaseDetail() {
             </div>
           </div>
 
-          {/* Interactive Live NADRA Verify Tool */}
-          <div className="panel" style={{ padding: 18, marginBottom: 18 }}>
+          {isLive && targetCase.paymentStatus && <p>{paymentText(targetCase)}</p>}
+          {!isLive && <div className="panel" style={{ padding: 18, marginBottom: 18 }}>
             <div
               style={{
                 display: "flex",
@@ -2074,12 +2163,21 @@ function CaseDetail() {
                 {nadraResult}
               </div>
             )}
-          </div>
+          </div>}
+          {canResubmit && (
+            <form className="panel" onSubmit={submitEvidence}>
+              <PanelHeader title="Submit supporting documents" />
+              <EvidenceInputs evidence={evidence} onChange={setEvidence} required={targetCase.requiredDocuments} />
+              <button type="submit" className="primary-button" disabled={resubmitting}>
+                {resubmitting ? "Submitting…" : "Submit updated application"}
+              </button>
+            </form>
+          )}
 
           <div className="panel timeline">
             <PanelHeader title="Chronological Case Timeline" />
             <ol className="timeline-list">
-              {targetCase.timeline.map((entry, i) => (
+              {timeline.map((entry, i) => (
                 <li key={entry.id}>
                   <i
                     className={`timeline-dot ${
@@ -2115,7 +2213,14 @@ function CaseDetail() {
             </p>
           </div>
 
-          <div className="reason-list">
+          {isLive && canTrace && trace?.caseId === caseId && trace?.revision === revision && (
+            <div className="reason-list">
+              <h4>Decision trace</h4>
+              <p>Policy v{trace?.rule}{trace?.model && ` · Model ${trace.model}`}</p>
+              <p>{trace?.reason}</p>
+            </div>
+          )}
+          {!isLive && <div className="reason-list">
             <h4>Signals and Evidence</h4>
             <div className="reason">
               <span className="reason-icon reason-icon--good">
@@ -2151,9 +2256,25 @@ function CaseDetail() {
               </span>
               <span>Identity verified in public registry</span>
             </div>
-          </div>
+          </div>}
 
           <div className="decision-actions">
+            {canAssign && (
+              <button type="button" className="primary-button" disabled={reviewing}
+                onClick={async () => {
+                  setReviewing(true);
+                  try {
+                    await assignCase(targetCase.id, revision!);
+                    setActionNotice("Case assigned to you.");
+                  } catch (error) {
+                    setActionNotice(error instanceof Error ? error.message : "Could not assign this case.");
+                  } finally {
+                    setReviewing(false);
+                  }
+                }}>
+                Assign to me
+              </button>
+            )}
             {isAuditor ? (
               <p
                 style={{
@@ -2165,8 +2286,13 @@ function CaseDetail() {
               >
                 Auditor permissions are strictly read-only.
               </p>
-            ) : (
+            ) : canReview ? (
               <>
+                {isLive && user?.role === "ADMIN" && (
+                  <label>Admin override reason
+                    <input value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} />
+                  </label>
+                )}
                 <button
                   type="button"
                   className="secondary-button"
@@ -2189,7 +2315,7 @@ function CaseDetail() {
                   Reject Case
                 </button>
               </>
-            )}
+            ) : null}
           </div>
         </aside>
       </section>
@@ -2227,7 +2353,7 @@ function CaseDetail() {
                 >
                   Cancel
                 </button>
-                <button type="submit" className="primary-button">
+                <button type="submit" disabled={reviewing} className="primary-button">
                   Send SMS Request
                 </button>
               </div>
@@ -2268,7 +2394,7 @@ function CaseDetail() {
                 >
                   Cancel
                 </button>
-                <button type="submit" className="primary-button">
+                <button type="submit" disabled={reviewing} className="primary-button">
                   Confirm Approval & Pay
                 </button>
               </div>
@@ -2340,6 +2466,10 @@ function ClaimForm() {
     (c) => c.name === helperActiveCitizen
   );
 
+  const isLive = user?.source === "api";
+  const idempotency = useRef<{ draft: string; key: string }>();
+  const [paymentAccount, setPaymentAccount] = useState("");
+  const [claimEvidence, setClaimEvidence] = useState<Partial<Record<EvidenceType, File>>>({});
   const [step, setStep] = useState(1);
   const [purpose, setPurpose] = useState("Relief assistance");
   const [personName, setPersonName] = useState(
@@ -2351,7 +2481,7 @@ function ClaimForm() {
       : user?.cnic || "99999-0000001-1"
   );
   const [phone, setPhone] = useState(
-    isHelper
+    isLive ? "" : isHelper
       ? helperCitizen?.phone || "0300-0000001"
       : user?.phone || "0300-0000001"
   );
@@ -2374,6 +2504,7 @@ function ClaimForm() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     if (!consent) {
       setError("Please confirm citizen consent agreement before proceeding.");
       return;
@@ -2382,13 +2513,20 @@ function ClaimForm() {
     setSubmitting(true);
 
     try {
+      const draft = JSON.stringify([user?.id, helperActiveCitizen, personName, cnic, phone, income, members, paymentAccount]);
+      if (idempotency.current?.draft !== draft) {
+        idempotency.current = { draft, key: crypto.randomUUID() };
+      }
       const res = await createCase({
         person: personName,
         cnic,
         phone,
         type: purpose,
-        householdIncome: parseInt(income, 10) || 30000,
-        householdMembers: parseInt(members, 10) || 4,
+        householdIncome: Number(income),
+        householdMembers: Number(members),
+        paymentAccount,
+        idempotencyKey: idempotency.current.key,
+        evidence: claimEvidence,
         address,
         notes: householdDesc,
         submittedBy: isHelper
@@ -2397,8 +2535,8 @@ function ClaimForm() {
         submittedByRole: user?.role || "CITIZEN",
       });
       setResult(res);
-    } catch {
-      setError("Could not complete submission.");
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "Could not complete submission.");
     } finally {
       setSubmitting(false);
     }
@@ -2451,16 +2589,8 @@ function ClaimForm() {
                 <Icon name="check" size={28} />
               </span>
               <h2>Claim Registered: {result.caseId}</h2>
-              <p>
-                Your assistance claim has been created and evaluated. Automated
-                routing:{" "}
-                <strong>
-                  {result.backendAi
-                    ? "Evaluated via live AI service (/api/ai/decide)"
-                    : "Evaluated via local policy adapter"}
-                </strong>
-                .
-              </p>
+              <p>{isLive ? "Your assistance claim was submitted for processing."
+                : "Your synthetic demo claim has been registered."}</p>
               <div style={{ display: "flex", gap: 10 }}>
                 <button
                   type="button"
@@ -2502,9 +2632,11 @@ function ClaimForm() {
                       onChange={(e) => setPurpose(e.target.value)}
                     >
                       <option>Relief assistance</option>
-                      <option>Emergency flood grant</option>
-                      <option>Document update</option>
-                      <option>Widow or disability support</option>
+                      {!isLive && <>
+                        <option>Emergency flood grant</option>
+                        <option>Document update</option>
+                        <option>Widow or disability support</option>
+                      </>}
                     </select>
                   </label>
                   <label>
@@ -2549,31 +2681,31 @@ function ClaimForm() {
                     />
                   </label>
                   <label>
-                    National Identity Card (CNIC)
+                    {isLive ? "Synthetic identity ID" : "National Identity Card (CNIC)"}
                     <input
                       value={cnic}
                       onChange={(e) => setCnic(e.target.value)}
-                      placeholder="e.g. 99999-0000001-1"
+                      placeholder={isLive ? "MOCK-123456" : "e.g. 99999-0000001-1"}
                       required
                     />
                   </label>
                   <label>
-                    Contact Mobile Number
+                    {isLive ? "Synthetic SMS number (optional)" : "Contact Mobile Number"}
                     <input
                       value={phone}
                       onChange={(e) => setPhone(e.target.value)}
-                      placeholder="e.g. 0300-0000001"
-                      required
+                      placeholder={isLive ? "+920000000001" : "e.g. 0300-0000001"}
+                      required={!isLive}
                     />
                   </label>
-                  <label>
+                  {!isLive && <label>
                     Residential Address
                     <input
                       value={address}
                       onChange={(e) => setAddress(e.target.value)}
                       required
                     />
-                  </label>
+                  </label>}
                   <div style={{ display: "flex", gap: 10 }}>
                     <button
                       type="button"
@@ -2596,7 +2728,7 @@ function ClaimForm() {
               {step === 3 && (
                 <>
                   <PanelHeader title="Step 3: Consent & Confirmation" />
-                  <label>
+                  {!isLive && <label>
                     Household Circumstances & Notes
                     <textarea
                       rows={3}
@@ -2604,8 +2736,17 @@ function ClaimForm() {
                       onChange={(e) => setHouseholdDesc(e.target.value)}
                       placeholder="Describe your current employment and family situation."
                     />
-                  </label>
+                  </label>}
 
+                  {isLive && (
+                    <>
+                      <label>Mock Raast account
+                        <input value={paymentAccount} onChange={(event) => setPaymentAccount(event.target.value)}
+                          placeholder="MOCK-ACCOUNT-001" required pattern="MOCK-.+" />
+                      </label>
+                      <EvidenceInputs evidence={claimEvidence} onChange={setClaimEvidence} />
+                    </>
+                  )}
                   <label className="consent-check">
                     <input
                       type="checkbox"
@@ -2614,9 +2755,9 @@ function ClaimForm() {
                       required
                     />
                     <span>
-                      I authorize RASTA to verify my identity record via NADRA and
-                      share relevant details with the social relief officer. I
-                      understand I can revoke this consent at any time.
+                      {isLive && isHelper
+                        ? "I confirm that the citizen granted processing and helper submission permissions."
+                        : "I authorize RASTA to verify my identity and use automated checks to process this claim. I can withdraw consent at any time."}
                     </span>
                   </label>
 
@@ -2640,7 +2781,7 @@ function ClaimForm() {
                       className="primary-button"
                       disabled={submitting}
                     >
-                      {submitting ? "Evaluating Claim…" : "Submit Official Claim"}
+                      {submitting ? "Submitting claim…" : "Submit Official Claim"}
                       {!submitting && <Icon name="arrow" size={15} />}
                     </button>
                   </div>
@@ -2664,7 +2805,7 @@ function ReviewQueue() {
   const [selectedCaseId, setSelectedCaseId] = useState("REL-20481");
 
   const queueCases = cases
-    .filter((c) => c.status === "Needs review")
+    .filter((c) => c.status === "Needs review" || c.status === "Checks passed")
     .filter((c) => priorityFilter === "All" || c.priority === priorityFilter)
     .sort((a, b) => {
       if (sort === "Priority") return a.priority.localeCompare(b.priority);
@@ -3010,21 +3151,30 @@ function Consent() {
   const [scope, setScope] = useState("Assistance claim filing & document upload");
   const [duration, setDuration] = useState("6");
 
-  const isAuditor = user?.role === "AUDITOR";
+  const isLive = user?.source === "api";
+  const canManage = isLive ? user?.role === "CITIZEN" : user?.role !== "AUDITOR";
+  const [consentError, setConsentError] = useState("");
+  const [liveScope, setLiveScope] = useState("processing");
+  const [helperId, setHelperId] = useState(demoAccounts.find((account) => account.role === "HELPER")?.id ?? "");
 
-  const handleGrantSubmit = (e: React.FormEvent) => {
+  const handleGrantSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    grantConsent({
+    setConsentError("");
+    try {
+      await grantConsent({
       citizenName: citName,
       citizenCnic: citCnic,
-      grantee,
-      scope,
+      grantee: isLive ? helperId : grantee,
+      scope: isLive ? liveScope : scope,
       durationMonths: parseInt(duration, 10) || 6,
       source: user?.role === "CITIZEN" ? "citizen" : "helper_proxy",
       actorName: user?.name || "User",
       actorRole: user?.role || "CITIZEN",
     });
-    setModalOpen(false);
+      setModalOpen(false);
+    } catch (error) {
+      setConsentError(error instanceof Error ? error.message : "Consent grant failed.");
+    }
   };
 
   const visibleConsents = consents.filter(
@@ -3052,7 +3202,7 @@ function Consent() {
               </button>
             ))}
           </div>
-          {!isAuditor && (
+          {canManage && (
             <button
               type="button"
               className="primary-button"
@@ -3064,6 +3214,7 @@ function Consent() {
         </div>
       </section>
 
+      {consentError && <p role="alert">{consentError}</p>}
       <div className="panel consent-panel">
         <PanelHeader title="Active Data Sharing Authorizations" />
         {visibleConsents.map((c) => (
@@ -3085,17 +3236,18 @@ function Consent() {
             <Badge tone={c.status === "Active" ? "success" : "muted"}>
               {c.status}
             </Badge>
-            {c.status === "Active" && !isAuditor && (
+            {c.status === "Active" && canManage && (
               <button
                 type="button"
                 className="outline-button"
-                onClick={() =>
-                  revokeConsent(
-                    c.id,
-                    user?.name || "Citizen",
-                    user?.role || "CITIZEN"
-                  )
-                }
+                onClick={async () => {
+                  setConsentError("");
+                  try {
+                    await revokeConsent(c.id, user?.name || "Citizen", user?.role || "CITIZEN");
+                  } catch (error) {
+                    setConsentError(error instanceof Error ? error.message : "Consent withdrawal failed.");
+                  }
+                }}
               >
                 Withdraw
               </button>
@@ -3113,6 +3265,21 @@ function Consent() {
             </div>
             <form onSubmit={handleGrantSubmit}>
               <div className="modal-body">
+                {isLive ? (
+                  <>
+                    <label>Scope
+                      <select value={liveScope} onChange={(event) => setLiveScope(event.target.value)}>
+                        <option value="processing">Identity verification and automated processing</option>
+                        <option value="helper">Helper case access and submission</option>
+                      </select>
+                    </label>
+                    {liveScope === "helper" && (
+                      <label>Helper user ID
+                        <input value={helperId} onChange={(event) => setHelperId(event.target.value)} required />
+                      </label>
+                    )}
+                  </>
+                ) : <>
                 <label>
                   Citizen Name
                   <input
@@ -3164,6 +3331,8 @@ function Consent() {
                     max={24}
                   />
                 </label>
+                </>}
+                {consentError && <p role="alert">{consentError}</p>}
               </div>
               <div className="modal-footer">
                 <button
@@ -3360,10 +3529,16 @@ function Rules() {
 
   const isAuditor = user?.role === "AUDITOR";
 
-  const handlePublish = () => {
-    publishDraftRule(user?.name || "Administrator");
-    setPublishedNotice(true);
-    setTimeout(() => setPublishedNotice(false), 3000);
+  const [publishError, setPublishError] = useState("");
+  const handlePublish = async () => {
+    setPublishError("");
+    try {
+      await publishDraftRule(user?.name || "Administrator");
+      setPublishedNotice(true);
+      setTimeout(() => setPublishedNotice(false), 3000);
+    } catch (error) {
+      setPublishError(error instanceof Error ? error.message : "Could not publish policy.");
+    }
   };
 
   return (
@@ -3372,6 +3547,7 @@ function Rules() {
         title="Rules & eligibility"
         eyebrow="WORKSPACE / POLICY CONTROL"
       />
+      {publishError && <p role="alert">{publishError}</p>}
       <section className="page-intro">
         <p>
           Change eligibility rules without changing application code. Every
