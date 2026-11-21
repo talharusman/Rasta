@@ -1,0 +1,7 @@
+[project]
+name = "relief-platform"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1", "sqlalchemy>=2.0,<3", "psycopg[binary]>=3.2,<4", "alembic>=1.14,<2", "pydantic-settings>=2.6,<3", "PyJWT[crypto]>=2.10,<3", "httpx>=0.28,<1", "python-multipart>=0.0.20"]
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.28"]
