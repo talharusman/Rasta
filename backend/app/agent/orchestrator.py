@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from shared import db as shared_db
+from ai.decision import explain as explain_result
 
 from . import notes, platform_bridge, tools
 from .consent_config import PROCESSING_DEPARTMENT_ID, PROCESSING_SCOPE
@@ -31,7 +32,7 @@ AGENT_ACTOR_ID = "case-processing-agent"
 
 # Flags that force human_review no matter what the AI service says (safety rules 1 and 2).
 CRITICAL_FLAGS = ("identity_mismatch", "identity_not_found", "duplicate_claim", "scam_suspected",
-                  "service_unavailable")
+                  "service_unavailable", "duplicate_check_incomplete", "document_pdf_review")
 BAD_STATUSES = ("unavailable", "malformed")
 # These have a fallback (template text) or happen after the decision, so a failure
 # is logged but does not count as "a check could not run".
@@ -131,6 +132,7 @@ class Ctx:
     results: Dict[str, Any] = field(default_factory=dict)
     flags: List[str] = field(default_factory=list)
     missing: List[str] = field(default_factory=list)
+    requested_documents: List[str] = field(default_factory=list)
     overrides: List[str] = field(default_factory=list)
     trace_extra: Dict[str, Any] = field(default_factory=dict)
     ai_down: bool = False
@@ -220,9 +222,14 @@ def _template_explanation(route: str, missing: List[str]) -> str:
 
 
 async def _finalize(ctx: Ctx, route: str, *, confidence=None, risk_score=None, rule_version=None,
-                    model_version=None, user_explanation: Optional[str] = None, m2_trace: Any = None,
+                    model_version=None, user_explanation: Optional[str] = None, user_explanation_ur: Optional[str] = None,
+                    m2_trace: Any = None,
                     reason: str = "", code: Optional[str] = None) -> None:
     case = ctx.case
+    if platform_bridge.is_live() and (not user_explanation or not user_explanation_ur):
+        localized = explain_result(route, ctx.flags)
+        user_explanation = user_explanation or localized["user_explanation"]
+        user_explanation_ur = user_explanation_ur or localized["user_explanation_ur"]
     if user_explanation is None:
         user_explanation = _template_explanation(route, ctx.missing)
     trace = {"steps": {k: _jsonable(v) for k, v in ctx.results.items() if k != "get_case_details"},
@@ -230,7 +237,9 @@ async def _finalize(ctx: Ctx, route: str, *, confidence=None, risk_score=None, r
     decision = {
         "route": route, "confidence": confidence, "risk_score": risk_score, "rule_version": rule_version,
         "model_version": model_version, "reason": reason, "user_explanation": user_explanation,
-        "flags": list(ctx.flags), "missing_evidence": list(ctx.missing), "code": code,
+        "user_explanation_ur": user_explanation_ur,
+        "flags": list(ctx.flags), "missing_evidence": list(ctx.missing),
+        "requested_documents": list(ctx.requested_documents), "code": code,
         "auditor_trace": _jsonable(trace), "decided_by": "agent", "run_id": ctx.run_id,
     }
     if platform_bridge.is_live():
@@ -333,10 +342,23 @@ async def _pipeline(ctx: Ctx) -> None:
     else:
         await _skip(ctx, "match_identity_name", "no registry name available")
 
+    elig = {}
+    if platform_bridge.is_live():
+        elig = await _step(ctx, "evaluate_eligibility", tools.evaluate_eligibility, case)
+    policy = elig.get("policy") or {}
+    required = sorted(set(policy.get("required_documents") or []) | set(case.get("required_documents") or []))
+
     # e) documents
     document_quality = None
-    if tools.field(case, "documents"):
-        docs = await _ai_step(ctx, "analyze_document", tools.analyze_document, case)
+    if tools.field(case, "documents") or (platform_bridge.is_live() and required):
+        if platform_bridge.is_live():
+            docs = await _ai_step(ctx, "analyze_document", tools.analyze_document, case, required)
+        else:
+            docs = await _ai_step(ctx, "analyze_document", tools.analyze_document, case)
+        for flag in docs.get("flags", []):
+            ctx.flag(flag)
+        ctx.requested_documents = docs.get("requested_documents", [])
+        ctx.missing.extend(ctx.requested_documents)
         if docs.get("status") == "ok":
             document_quality = docs["document_quality"]
     else:
@@ -359,8 +381,11 @@ async def _pipeline(ctx: Ctx) -> None:
     if dup.get("duplicate_flag") is True:
         ctx.flag("duplicate_claim")
 
-    # h) eligibility against the active rules
-    elig = await _step(ctx, "evaluate_eligibility", tools.evaluate_eligibility, case)
+    if case.get("tenant_id") and dup.get("complete") is False:
+        ctx.flag("duplicate_check_incomplete")
+
+    if not platform_bridge.is_live():
+        elig = await _step(ctx, "evaluate_eligibility", tools.evaluate_eligibility, case)
     rule_version = elig.get("rule_version")
 
     # i) routing (Member 2)
@@ -371,8 +396,18 @@ async def _pipeline(ctx: Ctx) -> None:
         "duplicate_flag": duplicate_flag,
         "scam_flag": scam_flag,
         "monthly_income": case.get("monthly_income"),
+        "household_size": case.get("household_size"),
     }
-    m2 = await _ai_step(ctx, "evaluate_route", tools.evaluate_route, ctx.case_id, rule_version, inputs)
+
+    async def evaluate():
+        if case.get("tenant_id"):
+            if not rule_version or not policy:
+                return tools._fail(ValueError("Missing policy snapshot"), "Cannot evaluate case")
+            return await tools.evaluate_route(ctx.case_id, rule_version, inputs, tenant_id=case["tenant_id"],
+                                              policy=policy, flags=ctx.flags)
+        return await tools.evaluate_route(ctx.case_id, rule_version, inputs)
+
+    m2 = await _ai_step(ctx, "evaluate_route", evaluate)
     m2_ok = m2.get("status") == "ok"
 
     # j) safety overrides (M3_CONTEXT safety rules 1 and 2)
@@ -409,16 +444,18 @@ async def _pipeline(ctx: Ctx) -> None:
         ctx.missing.append("clearer_identity_document" if "document_quality_low" in ctx.flags else "additional_evidence")
 
     # explanation: Member 2's /explain, falling back to a short template
-    explanation = None
+    explanation = explanation_ur = None
     if not ctx.ai_down:
         ex = await _ai_step(ctx, "explain", tools.explain, ctx.case_id, route, list(ctx.flags), rule_version)
         if ex.get("status") == "ok":
             explanation = ex["user_explanation"]
+            explanation_ur = ex.get("user_explanation_ur")
     reason = "; ".join(reason_bits) or (f"AI route: {route}" if m2_ok else "AI evaluation unavailable")
     await _finalize(
         ctx, route, confidence=m2.get("confidence") if m2_ok else None,
         risk_score=m2.get("risk_score") if m2_ok else None, rule_version=rule_version,
         model_version=m2.get("model_version") if m2_ok else None, user_explanation=explanation,
+        user_explanation_ur=explanation_ur,
         m2_trace=m2.get("auditor_trace") if m2_ok else None, reason=reason)
     # k) record_decision, l) route action and m) send_notification all run inside _finalize.
 

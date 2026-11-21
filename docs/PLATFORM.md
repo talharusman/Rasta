@@ -2,9 +2,9 @@
 
 Member 1 backend implementation for the supplied Coder's Cup execution plan. Prototype only: use synthetic identities, documents, policies and accounts.
 
-- [Setup and credentials](docs/SETUP.md)
-- [Frontend API guide](docs/FRONTEND_API_GUIDE.md)
-- [Implementation status and team handoff](docs/MEMBER1_IMPLEMENTATION_PLAN.md)
+- [Setup and credentials](SETUP.md)
+- [Frontend API guide](FRONTEND_API_GUIDE.md)
+- [Implementation status and team handoff](MEMBER1_IMPLEMENTATION_PLAN.md)
 
 Python 3.12 / FastAPI / Supabase Auth / PostgreSQL / SQLAlchemy 2 / Alembic / psycopg.
 

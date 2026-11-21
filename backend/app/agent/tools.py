@@ -9,8 +9,10 @@
 #   monthly_income, documents:[{id,type,quality?}], message, citizen_phone
 import asyncio
 import inspect
+import math
 from typing import Any, Dict, List, Optional
 
+from ai.decision import DOC_GOOD
 from app.integrations.providers import registry
 
 from . import ai_client, notes, platform_bridge
@@ -107,21 +109,48 @@ async def match_identity_name(case: Dict[str, Any], registry_name: str) -> Dict[
             "model_version": res.get("model_version")}
 
 
-async def analyze_document(case: Dict[str, Any]) -> Dict[str, Any]:
-    documents: List[Dict[str, Any]] = field(case, "documents", default=[]) or []
+def _valid_score(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1
+
+
+async def analyze_document(case: Dict[str, Any], required: Optional[List[str]] = None) -> Dict[str, Any]:
+    documents = field(case, "documents", default=[])
+    live_ai = bool(case.get("tenant_id")) and not ai_client.stub_enabled()
+    required_types = set(required or [])
+    if live_ai and required_types:
+        documents = [doc for doc in documents if doc.get("type") in required_types]
+    missing = sorted(required_types - {doc.get("type") for doc in documents}) if live_ai else []
+    flags = ["required_proof_missing"] if missing else []
     if not documents:
-        return {"status": "skipped", "reason": "no_documents"}
+        return {"status": "skipped", "reason": "no_documents", "requested_documents": missing, "flags": flags}
     qualities, analyzed = [], []
     for doc in documents:
+        if live_ai and doc.get("content_type") == "application/pdf":
+            analyzed.append({"id": doc.get("id"), "type": doc.get("type"), "status": "pdf_review"})
+            if "document_pdf_review" not in flags:
+                flags.append("document_pdf_review")
+            continue
+
         if platform_bridge.is_live():
             await _bridge(platform_bridge.live_call, "check_processing", case["id"], case["submission_count"])
-        res = await ai_client.extract_document({"case_id": case.get("id"), "document": doc})
-        if res.get("status") != "ok" or not isinstance(res.get("quality"), (int, float)):
+        payload = {"case_id": case.get("id"), "document": doc}
+        if live_ai:
+            payload["tenant_id"] = case["tenant_id"]
+        res = await ai_client.extract_document(payload)
+        quality = res.get("quality")
+        if live_ai and res.get("status") == "unreadable":
+            quality = 0.0
+        elif res.get("status") != "ok" or not _valid_score(quality):
             return {"status": res.get("status") if res.get("status") != "ok" else "malformed",
-                    "error": res.get("error", "no quality in response"), "documents": analyzed}
-        qualities.append(float(res["quality"]))
-        analyzed.append({"id": doc.get("id"), "type": res.get("document_type"), "quality": float(res["quality"])})
-    return {"status": "ok", "document_quality": min(qualities), "documents": analyzed}
+                    "error": res.get("error", "Invalid document quality"), "documents": analyzed,
+                    "flags": flags, "requested_documents": missing}
+        qualities.append(float(quality))
+        if live_ai and quality < DOC_GOOD:
+            missing.append(doc["type"])
+        analyzed.append({"id": doc.get("id"), "type": res.get("document_type") or doc.get("type"),
+                         "quality": float(quality), "status": res.get("status")})
+    return {"status": "ok", "document_quality": min(qualities, default=None), "documents": analyzed,
+            "requested_documents": sorted(set(missing)), "flags": flags}
 
 
 async def check_scam_message(case: Dict[str, Any]) -> Dict[str, Any]:
@@ -141,12 +170,17 @@ async def find_duplicate_claims(case: Dict[str, Any]) -> Dict[str, Any]:
         "case_id": case.get("id"), "citizen_id": case.get("citizen_id"),
         "mock_identity_id": case.get("mock_identity_id"),
         "name": field(case, "applicant_name", "name", default=""), "dob": case.get("dob"),
-        "account_id": case.get("account_id"),
+        "account_id": case.get("account_id"), "tenant_id": case.get("tenant_id"),
+        "claim_type": case.get("claim_type"),
     })
     if res.get("status") != "ok" or not isinstance(res.get("duplicate_flag"), bool):
         return {"status": res.get("status") if res.get("status") != "ok" else "malformed",
                 "error": res.get("error", "no duplicate_flag in response")}
-    return {"status": "ok", "duplicate_flag": res["duplicate_flag"], "matches": res.get("matches", [])}
+    complete = res.get("complete")
+    if case.get("tenant_id") and not ai_client.stub_enabled() and type(complete) is not bool:
+        return {"status": "malformed", "error": "Duplicate response omitted check completeness"}
+    return {"status": "ok", "duplicate_flag": res["duplicate_flag"], "matches": res.get("matches", []),
+            "complete": complete, "warnings": res.get("warnings", [])}
 
 
 async def evaluate_eligibility(case: Dict[str, Any]) -> Dict[str, Any]:
@@ -162,6 +196,7 @@ async def evaluate_eligibility(case: Dict[str, Any]) -> Dict[str, Any]:
         "status": "ok",
         "eligible": bool(result.get("eligible")),
         "rule_version": result.get("rule_version") or rules.get("version"),
+        "policy": rules,
         "failed_rules": list(result.get("failed_rules", [])),
         "missing_fields": list(result.get("missing_fields", [])),
     }
@@ -170,29 +205,45 @@ async def evaluate_eligibility(case: Dict[str, Any]) -> Dict[str, Any]:
 _ROUTES = ("cleared", "needs_proof", "human_review")
 
 
-async def evaluate_route(case_id: str, rule_version: Optional[str], inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def evaluate_route(case_id: str, rule_version: Optional[str | int], inputs: Dict[str, Any],
+                         *, tenant_id: Optional[str] = None, policy: Optional[Dict[str, Any]] = None,
+                         flags: Optional[List[str]] = None) -> Dict[str, Any]:
     """Member 2 /internal/ai/evaluate. A reply that does not match the contract is
     treated as malformed, never as a route."""
-    res = await ai_client.evaluate({"case_id": case_id, "rule_version": rule_version, "input": inputs})
+    payload = {"case_id": case_id, "rule_version": rule_version, "input": inputs}
+    if tenant_id:
+        payload.update(tenant_id=tenant_id, rules=policy, flags=flags or [])
+    res = await ai_client.evaluate(payload)
     if res.get("status") in ("unavailable", "malformed"):
         return {"status": res["status"], "error": res.get("error")}
     if res.get("route") not in _ROUTES:
         return {"status": "malformed", "error": f"evaluate returned route {res.get('route')!r}"}
+    if tenant_id and not ai_client.stub_enabled():
+        if (
+            not _valid_score(res.get("confidence")) or not _valid_score(res.get("risk_score"))
+            or not isinstance(res.get("flags"), list) or not all(isinstance(flag, str) for flag in res["flags"])
+            or not isinstance(res.get("model_version"), str) or not res["model_version"]
+            or not isinstance(res.get("auditor_trace"), dict)
+            or res["auditor_trace"].get("thresholds_source") != "request"
+            or type(res.get("rule_version")) is not int or res["rule_version"] != rule_version
+        ):
+            return {"status": "malformed", "error": "AI result did not match the pinned policy and response contract"}
     return {
         "status": "ok", "route": res["route"], "confidence": res.get("confidence"),
         "risk_score": res.get("risk_score"), "flags": list(res.get("flags") or []),
         "rule_version": res.get("rule_version") or rule_version, "model_version": res.get("model_version"),
-        "user_explanation": res.get("user_explanation"), "auditor_trace": res.get("auditor_trace"),
+        "user_explanation": res.get("user_explanation"), "user_explanation_ur": res.get("user_explanation_ur"),
+        "auditor_trace": res.get("auditor_trace"),
     }
 
 
-async def explain(case_id: str, route: str, flags: List[str], rule_version: Optional[str]) -> Dict[str, Any]:
+async def explain(case_id: str, route: str, flags: List[str], rule_version: Optional[str | int]) -> Dict[str, Any]:
     res = await ai_client.explain({"case_id": case_id, "route": route, "flags": flags, "rule_version": rule_version})
     text = res.get("user_explanation")
     if res.get("status") != "ok" or not isinstance(text, str) or not text.strip():
         return {"status": res.get("status") if res.get("status") != "ok" else "malformed",
                 "error": res.get("error", "no user_explanation in response")}
-    return {"status": "ok", "user_explanation": text}
+    return {"status": "ok", "user_explanation": text, "user_explanation_ur": res.get("user_explanation_ur")}
 
 
 async def request_more_evidence(case_id: str, missing: List[str], message: str = "") -> Dict[str, Any]:

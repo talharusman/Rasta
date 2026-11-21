@@ -185,7 +185,7 @@ async def extract_document(request: Request):
         document_id=doc.id if doc else None,
         text=(doc.text if doc else None) or body.text,
         reported_quality=doc.quality if doc else None,
-        expected=body.expected, case_id=body.case_id)
+        expected=body.expected, case_id=body.case_id, tenant_id=body.tenant_id)
 
 
 @internal.get("/metrics")

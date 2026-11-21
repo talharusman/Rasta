@@ -1,6 +1,6 @@
 # OWNER: Member 3
 # One async handler per job kind: handler(payload, job). Raise to retry; raise
-# JobFailedPermanently to fail at once. Money rules (M3_CONTEXT.md safety rule 3):
+# JobFailedPermanently to fail at once. Money rules (docs/M3_CONTEXT.md safety rule 3):
 # the only place a payment is started is PaymentProvider.disburse, which pays approved
 # cases only, always with key "disburse-<case_id>", and is never blindly retried:
 # after any unknown outcome we reconcile (look up) first.

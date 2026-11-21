@@ -39,8 +39,12 @@ def unavailable(error: str) -> Dict[str, Any]:
     return {"status": "unavailable", "error": error}
 
 
+def stub_enabled() -> bool:
+    return os.getenv("AI_STUB", "").strip().lower() in ("1", "true", "yes")
+
+
 async def _post(name: str, payload: Dict[str, Any], case_id: Optional[str] = None) -> Dict[str, Any]:
-    if os.getenv("AI_STUB", "").strip().lower() in ("1", "true", "yes"):
+    if stub_enabled():
         return _STUBS[name](payload)
 
     base_url = os.getenv("AI_BASE_URL", "http://localhost:8000")
@@ -58,6 +62,13 @@ async def _post(name: str, payload: Dict[str, Any], case_id: Optional[str] = Non
                 error = f"AI service returned HTTP {status_code}"
             elif status_code >= 400:  # our request is wrong: retrying will not help
                 _log(name, attempt, status_code, started, case_id, f"HTTP {status_code}")
+                if name == "extract-document" and status_code == 422:
+                    try:
+                        code = response.json()["error"]["code"]
+                    except (KeyError, ValueError, TypeError):
+                        code = None
+                    if code == "DOCUMENT_UNREADABLE":
+                        return {"status": "unreadable", "code": code}
                 return unavailable(f"AI service rejected the request (HTTP {status_code})")
             else:
                 _log(name, attempt, status_code, started, case_id)

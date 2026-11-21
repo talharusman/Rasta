@@ -1,5 +1,5 @@
 # OWNER: Member 3
-# Result models and provider Protocols (see M3_CONTEXT.md "Adapters").
+# Result models and provider Protocols (see docs/M3_CONTEXT.md "Adapters").
 # Adapters NEVER raise to callers: every failure becomes a status + error text.
 # All provider methods are async (they do network I/O).
 from decimal import Decimal

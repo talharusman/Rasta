@@ -127,7 +127,7 @@ INACTIVE_CASE_STATUSES = ("draft", "rejected", "closed")
 
 def platform_claims(tenant_id: Optional[str] = None) -> Source:
     """Open claims from the platform: {case_id, status, citizen_id, mock_identity_id, name, dob, account_id}."""
-    sql = ("SELECT c.id, c.status, c.data, c.citizen_id, c.tenant_id, z.mock_identity_id AS citizen_identity "
+    sql = ("SELECT c.id, c.status, c.data, c.citizen_id, c.tenant_id, c.claim_type, z.mock_identity_id AS citizen_identity "
            "FROM cases c LEFT JOIN citizens z ON z.id = c.citizen_id "
            "WHERE c.status NOT IN ('draft', 'rejected', 'closed')")
     params: Dict[str, Any] = {}
@@ -141,7 +141,7 @@ def platform_claims(tenant_id: Optional[str] = None) -> Source:
     for r in src.rows:
         data = _json(r.get("data")) or {}
         rows.append({
-            "case_id": str(r["id"]), "status": r["status"], "citizen_id": str(r["citizen_id"]) if r["citizen_id"] else None,
+            "case_id": str(r["id"]), "status": r["status"], "claim_type": r["claim_type"], "citizen_id": str(r["citizen_id"]) if r["citizen_id"] else None,
             "mock_identity_id": data.get("mock_identity_id") or r.get("citizen_identity"),
             "name": data.get("name") or data.get("applicant_name"), "dob": data.get("dob"),
             "account_id": data.get("payment_account") or data.get("account_id"),
@@ -169,9 +169,13 @@ def rule(version: Any = None, tenant_id: Optional[str] = None) -> Source:
     return src
 
 
-def document_file(document_id: str) -> Source:
-    return _query("SELECT file_path, content_type, type FROM case_documents WHERE CAST(id AS VARCHAR) = :id",
-                  {"id": str(document_id)}, origin="platform_documents")
+def document_file(document_id: str, *, case_id: Any = None, tenant_id: Optional[str] = None) -> Source:
+    sql = "SELECT file_path, content_type, type FROM case_documents WHERE CAST(id AS VARCHAR) = :id"
+    params = {"id": str(document_id)}
+    if tenant_id is not None:
+        sql += " AND CAST(case_id AS VARCHAR) = :case_id AND CAST(tenant_id AS VARCHAR) = :tenant"
+        params.update(case_id=str(case_id), tenant=tenant_id)
+    return _query(sql, params, origin="platform_documents")
 
 
 def _version_number(version: Any) -> Optional[int]:
