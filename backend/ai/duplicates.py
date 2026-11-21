@@ -63,21 +63,23 @@ def detect(claim: Dict[str, Any]) -> Dict[str, Any]:
 
     # ---- 1. other open claims -------------------------------------------------
     others: Dict[str, Dict[str, Any]] = {}
-    platform = data_sources.platform_claims(claim.get("tenant_id"))
+    tenant_id = claim.get("tenant_id")
+    platform = data_sources.platform_claims(tenant_id)
     if platform.ok:
         sources.append("platform_cases")
         for row in platform.rows:
             others[row["case_id"]] = row
-    elif platform.unreachable:
+    elif platform.unreachable or tenant_id:
         if _strict():
             raise SourceUnavailable(platform.error)
-        warnings.append("Case database unreachable; only claims seen by this service were checked.")
+        warnings.append("The platform case database could not be checked for duplicates.")
     else:
         warnings.append("Platform case table not available here; only claims seen by this service were checked.")
-    with _LOCK:
-        for cid, row in _SEEN.items():
-            others.setdefault(cid, row)
-    sources.append("ai_claim_memory")
+    if tenant_id is None:
+        with _LOCK:
+            for cid, row in _SEEN.items():
+                others.setdefault(cid, row)
+        sources.append("ai_claim_memory")
 
     matches: List[Dict[str, Any]] = []
     for cid, other in others.items():
@@ -118,8 +120,9 @@ def detect(claim: Dict[str, Any]) -> Dict[str, Any]:
     else:
         warnings.append("Identity registry not available; registry duplicates were not checked.")
 
-    _remember({"case_id": case_id, "citizen_id": claim.get("citizen_id"), "mock_identity_id": identity,
-               "name": name, "dob": dob, "account_id": claim.get("account_id"), "claim_type": claim.get("claim_type")})
+    if tenant_id is None:
+        _remember({"case_id": case_id, "citizen_id": claim.get("citizen_id"), "mock_identity_id": identity,
+                   "name": name, "dob": dob, "account_id": claim.get("account_id"), "claim_type": claim.get("claim_type")})
 
     blocking = [m for m in matches if m["type"] in ("same_identity", "same_citizen")]
     first_claim = next((m for m in matches if m["case_id"]), None)
@@ -132,8 +135,9 @@ def detect(claim: Dict[str, Any]) -> Dict[str, Any]:
         explanation = ("Possible duplicate found (" + ", ".join(k.replace("_", " ") for k in kinds) +
                        "). An officer must confirm these are different people before anything proceeds.")
     else:
-        action = "allow"
-        explanation = "No other open claim or identity record matched this claim."
+        action = "officer_review" if warnings and tenant_id else "allow"
+        explanation = ("The duplicate check could not be completed." if action == "officer_review"
+                       else "No other open claim or identity record matched this claim.")
     return {
         "duplicate_flag": bool(matches),
         "duplicate_found": bool(matches),

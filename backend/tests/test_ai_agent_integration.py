@@ -39,6 +39,8 @@ def world(monkeypatch, tmp_path):
     shared_db.Base.metadata.create_all(engine, tables=[m.__table__ for m in MOCK_MODELS + PROVIDER_MODELS + AGENT_MODELS])
     monkeypatch.setattr(shared_db, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
     seed_mocks(reset=True)
+    # This fixture exercises the real AI HTTP calls with in-memory platform cases.
+    monkeypatch.setattr(platform_bridge, "_implementation", None)
     platform_bridge.stub_reset()
     data_sources.reset_cache()
     duplicates.reset_memory()

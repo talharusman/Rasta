@@ -37,6 +37,10 @@ If neither key is set, every internal route returns 403 (it fails closed).
 Errors use the team format: `{"error": {"code", "message", "retryable"}, "request_id"}`.
 I return 4xx for bad input and 5xx when I cannot answer. I never return a fake "all clear".
 
+## Integrated app
+
+See the [Member 2 integration guide](AI_INTEGRATION.md) for the shared app environment and manual workflows.
+
 ## For Member 3 (agent): field names
 
 - I accept all your field names as written in FOR_MEMBER_2.md. **No changes are needed on your side.**
@@ -48,6 +52,8 @@ I return 4xx for bad input and 5xx when I cannot answer. I never return a fake "
   With none of these I return **422**, and you treat that as unavailable, which routes to human_review.
 - `detect-duplicates` checks Member 1's `cases` table (read-only), plus claims I have already seen, plus
   your registry (the MOCK-200003/200004 pair is caught as `possible_duplicate_identity`).
+  Live requests send `tenant_id` and `claim_type` and use tenant-scoped platform cases.
+  The in-memory history is only used by standalone requests without a tenant.
 - Flags I use: `identity_not_verified`, `low_name_match` (<0.70), `name_match_uncertain` (0.70–0.95),
   `name_match_unknown`, `document_missing`, `document_quality_low` (<0.80), `duplicate_claim`,
   `scam_suspected`, `income_above_limit`, `income_missing`.
@@ -59,7 +65,7 @@ I return 4xx for bad input and 5xx when I cannot answer. I never return a fake "
   `max_monthly_income`, `critical_flags`. An integer `rule_version` (or `"rules-v2"`) loads **that** version even if it
   is no longer active, so old decisions keep their rules. Without a version, I use the active rule. If the
   table is unreachable, I use built-in defaults (0.95 / 0.70 / 50000), and `auditor_trace.thresholds_source` says which source was used.
-- I echo `rule_version` exactly as sent. Your `Result` schema needs an int, so please send the int version.
+- The live agent sends the full pinned policy snapshot and its integer version. The AI echoes that version and records that it used the request thresholds.
 - **Suggestion for `shared/db.py`:** the engine has no connect timeout. When Postgres is down, psycopg can hang
   forever on Windows. I guard against this in my code, but `create_engine(DATABASE_URL, connect_args={"connect_timeout": 5})`
   would protect everyone.

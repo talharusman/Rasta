@@ -232,6 +232,7 @@ def detail(session: Session, case: Case):
     value['case_id'] = value.pop('id')
     dec = session.scalar(select(Decision).where(Decision.case_id == case.id, Decision.processing_generation == case.processing_generation))
     value['user_explanation'] = dec.payload['user_explanation'] if dec else None
+    value['user_explanation_ur'] = dec.payload.get('user_explanation_ur') if dec else None
     if dec:
         value['decision'] = {key: dec.payload.get(key) for key in (
             'route', 'confidence', 'identity_verified', 'rule_version', 'model_version'
@@ -254,7 +255,7 @@ def evaluate(session: Session, case: Case, rule: Rule, confidence: float | None,
     critical = {
         'identity_mismatch', 'identity_not_found', 'identity_service_unavailable',
         'duplicate_claim', 'potential_duplicate', 'fraud_indicator', 'scam_suspected',
-        'service_unavailable',
+        'service_unavailable', 'duplicate_check_incomplete', 'document_pdf_review',
     } | set(policy.get('critical_flags', []))
     if not identity_verified or critical.intersection(flags) or case.data.get('monthly_income', 0) > policy['max_monthly_income']:
         route = 'human_review'

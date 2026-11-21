@@ -675,12 +675,16 @@ def scam(body: Scam, request: Request, user: Actor, session: DB):
     processing(session, citizen)
     payload = ai_call('/internal/ai/scam-check', {'text': body.text})
     if (
-        payload.get('label') not in ('likely_scam', 'uncertain', 'no_scam_indicators')
-        or not isinstance(payload.get('confidence'), (float, int))
+        not isinstance(payload, dict)
+        or payload.get('label') not in ('likely_scam', 'uncertain', 'no_scam_indicators')
+        or type(payload.get('confidence')) not in (float, int)
         or not 0 <= payload['confidence'] <= 1
         or not isinstance(payload.get('indicators'), list)
+        or not all(isinstance(item, str) for item in payload['indicators'])
+        or any(not isinstance(payload.get(key), str) or not payload[key].strip()
+               for key in ('explanation', 'recommended_action'))
     ):
-        fail(503, 'SERVICE_UNAVAILABLE', 'Invalid AI response')
+        fail(503, 'SERVICE_UNAVAILABLE', 'The scam checker could not return a result. Try again.', True)
     row = ScamCheck(tenant_id=user.tenant_id, citizen_id=citizen.id, payload={'text': body.text, **payload})
     session.add(row)
     session.flush()

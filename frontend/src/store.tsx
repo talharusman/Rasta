@@ -795,9 +795,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       date: relativeTime(row.created_at), submittedAt: row.created_at, submittedBy: row.data?.name ?? "—",
       submittedByRole: "CITIZEN", aiRoute: row.decision?.route ?? "Pending",
       aiReason: row.user_explanation ?? "Automated assessment pending.",
+      aiReasonUr: row.user_explanation_ur ?? undefined,
       aiConfidence: confidence ?? 0, nadraVerified: row.decision?.identity_verified,
       timeline: [], backendStatus: row.status, backendRevision: row.revision,
-      requiredDocuments: row.required_documents, assignedOfficerId: row.assigned_officer_id,
+      requiredDocuments: row.required_documents, documents: row.documents, assignedOfficerId: row.assigned_officer_id,
       paymentStatus: row.payment?.status, paymentTxnId: row.payment?.transaction_id ?? undefined,
       paymentAmount: row.payment?.amount ?? undefined,
     };

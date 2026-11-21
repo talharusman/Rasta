@@ -16,10 +16,12 @@ import {
   type DemoAccount,
   apiHealth,
   demoAccounts,
+  downloadBackendEvidence,
   fetchBackendHistory,
   fetchBackendTrace,
   type EvidenceType,
-  requestAiDecision,
+  checkBackendScam,
+  type ScamAssessment,
   verifyNadra,
 } from "./api";
 import { useAuth } from "./auth";
@@ -767,15 +769,18 @@ function CitizenHome() {
   const { user } = useAuth();
   const { cases, currentLang, toggleLanguage, settings } = useData();
   const [scamInput, setScamInput] = useState("");
-  const [scamAnalysis, setScamAnalysis] = useState<{
-    tested: boolean;
-    isScam: boolean;
-    confidence: number;
-    reason: string;
-    urduNote: string;
-    backendReal: boolean;
-  } | null>(null);
+  const [scamAnalysis, setScamAnalysis] = useState<{ result: ScamAssessment; demo: boolean } | null>(null);
+  const [scamError, setScamError] = useState("");
   const [analyzingScam, setAnalyzingScam] = useState(false);
+  const scamRequest = useRef(0);
+
+  useEffect(() => {
+    setScamInput("");
+    setScamAnalysis(null);
+    setScamError("");
+    setAnalyzingScam(false);
+    return () => { scamRequest.current += 1; };
+  }, [user?.id, user?.source]);
 
   // Find citizen's relevant cases
   const myCases = cases.filter(
@@ -786,64 +791,39 @@ function CitizenHome() {
   const latestCase = myCases[0] || cases[0];
 
   const checkScamMessage = async (msg: string) => {
-    if (!msg.trim()) return;
+    if (!msg.trim() || analyzingScam) return;
+    const request = ++scamRequest.current;
     setAnalyzingScam(true);
-    let backendReal = false;
-    let isScam = false;
-    let confidence = 0.88;
-    let reason = "";
-    let urduNote = "";
-
-    const lower = msg.toLowerCase();
-    const scamTriggers = [
-      "won",
-      "lottery",
-      "8171",
-      "fee",
-      "send money",
-      "bisp",
-      "inami",
-      "transfer",
-      "jazzcash",
-      "easypaisa",
-      "pin",
-      "otp",
-    ];
-    const hasTrigger = scamTriggers.some((t) => lower.includes(t));
-
+    setScamError("");
+    setScamAnalysis(null);
     try {
-      // Call real backend AI decision service
-      await requestAiDecision();
-      backendReal = true;
-    } catch {
-      backendReal = false;
+      if (user?.source === "api") {
+        if (!user.citizen_id) throw new Error("A linked citizen profile is required to check a message.");
+        const result = await checkBackendScam(user.citizen_id, msg);
+        if (request === scamRequest.current) setScamAnalysis({ result, demo: false });
+      } else {
+        const indicators = ["lottery", "fee", "send money", "pin", "otp"]
+          .filter((trigger) => msg.toLowerCase().includes(trigger));
+        const flagged = indicators.length > 0;
+        setScamAnalysis({
+          demo: true,
+          result: {
+            label: flagged ? "likely_scam" : "no_scam_indicators",
+            confidence: 0,
+            indicators,
+            explanation: flagged ? "The message contains common scam keywords."
+              : "No common scam keywords were found. Verify the message through an official channel.",
+            recommended_action: "Keep codes and PINs private. Verify the message with an official relief office.",
+          },
+        });
+      }
+    } catch (error) {
+      if (request === scamRequest.current) {
+        setScamError(error instanceof Error ? error.message : "Could not check the message. Please try again.");
+      }
+    } finally {
+      if (request === scamRequest.current) setAnalyzingScam(false);
     }
-
-    if (hasTrigger) {
-      isScam = true;
-      confidence = 0.94;
-      reason =
-        "Advance-fee fraud or unauthorized solicitation detected. Official government aid programs never ask for registration fees, JazzCash/EasyPaisa transfers, or OTPs.";
-      urduNote =
-        "خبردار: یہ پیغام مشتبہ ہے۔ حکومت پاکستان کبھی بھی امداد دینے کے لیے کوئی فیس یا پیشگی رقم طلب نہیں کرتی۔";
-    } else {
-      isScam = false;
-      confidence = 0.72;
-      reason =
-        "No common fraudulent solicitation keywords identified. However, always verify directly through official department centers.";
-      urduNote =
-        "اس پیغام میں بظاہر کوئی فراڈ کے الفاظ نہیں ملے، لیکن کسی کو بھی اپنی ذاتی معلومات یا پاس ورڈ نہ دیں۔";
-    }
-
-    setScamAnalysis({
-      tested: true,
-      isScam,
-      confidence,
-      reason,
-      urduNote,
-      backendReal,
-    });
-    setAnalyzingScam(false);
   };
 
   return (
@@ -1022,30 +1002,23 @@ function CitizenHome() {
             <Icon name="spark" size={15} />
           </button>
 
-          {scamAnalysis?.tested && (
-            <div
+          {scamError && <p className="form-error" role="alert">{scamError}</p>}
+          {scamAnalysis && (
+            <div aria-live="polite"
               className={`scam-result-card ${
-                scamAnalysis.isScam
-                  ? "scam-result-card--danger"
-                  : "scam-result-card--safe"
-              }`}
-            >
+                scamAnalysis.result.label === "likely_scam" ? "scam-result-card--danger"
+                  : scamAnalysis.result.label === "no_scam_indicators" ? "scam-result-card--safe" : ""
+              }`}>
               <strong>
-                {scamAnalysis.isScam
-                  ? "⚠️ POTENTIAL FRAUD DETECTED"
-                  : "✓ NO SUSPICIOUS FRAUD PATTERNS DETECTED"}
-                <span
-                  className={`api-badge ${
-                    scamAnalysis.backendReal
-                      ? "api-badge--live"
-                      : "api-badge--demo"
-                  }`}
-                >
-                  {scamAnalysis.backendReal ? "AI API connected" : "Local AI rule"}
-                </span>
+                {{ likely_scam: "Likely scam", uncertain: "Uncertain",
+                   no_scam_indicators: "No common scam indicators found" }[scamAnalysis.result.label]}
+                {scamAnalysis.demo && <span className="api-badge api-badge--demo">Browser demo</span>}
               </strong>
-              <p>{scamAnalysis.reason}</p>
-              <div className="scam-urdu-quote">{scamAnalysis.urduNote}</div>
+              <p>{scamAnalysis.result.explanation}</p>
+              {scamAnalysis.result.indicators.length > 0 && (
+                <ul>{scamAnalysis.result.indicators.map((indicator) => <li key={indicator}>{indicator}</li>)}</ul>
+              )}
+              <p>{scamAnalysis.result.recommended_action}</p>
             </div>
           )}
         </div>
@@ -1880,26 +1853,29 @@ function EvidenceInputs({ evidence, onChange, required = [] }: {
   onChange: (files: Partial<Record<EvidenceType, File>>) => void;
   required?: EvidenceType[];
 }) {
-  return <>{([
-    ["identity_proof", "Identity proof"], ["income_proof", "Income proof"],
-  ] as const).map(([type, label]) => (
-    <label key={type}>{label}{required.includes(type) ? " (requested)" : ""}
-      <input type="file" accept="image/jpeg,image/png,application/pdf"
-        onChange={(event) => {
-          const next = { ...evidence };
-          const file = event.target.files?.[0];
-          if (file) next[type] = file;
-          else delete next[type];
-          onChange(next);
-        }} />
-    </label>
-  ))}</>;
+  return <>
+    <p>Upload a JPEG or PNG for automated checks. PDFs go to an officer for review.</p>
+    {([
+      ["identity_proof", "Identity proof"], ["income_proof", "Income proof"],
+    ] as const).map(([type, label]) => (
+      <label key={type}>{label}{required.includes(type) ? " (requested)" : ""}
+        <input type="file" accept="image/jpeg,image/png,application/pdf"
+          onChange={(event) => {
+            const next = { ...evidence };
+            const file = event.target.files?.[0];
+            if (file) next[type] = file;
+            else delete next[type];
+            onChange(next);
+          }} />
+      </label>
+    ))}
+  </>;
 }
 
 function CaseDetail() {
   const { caseId } = useParams();
   const { user } = useAuth();
-  const { getCase, officerAction, resumeCase, assignCase } = useData();
+  const { getCase, officerAction, resumeCase, assignCase, currentLang } = useData();
   const targetCase = getCase(caseId || "REL-20481");
 
   const [evidenceModal, setEvidenceModal] = useState(false);
@@ -1917,7 +1893,10 @@ function CaseDetail() {
   const [evidence, setEvidence] = useState<Partial<Record<EvidenceType, File>>>({});
   const [reviewing, setReviewing] = useState(false);
   const [liveHistory, setLiveHistory] = useState<{ caseId: string; revision: number; items: CaseRecord["timeline"] }>();
-  const [trace, setTrace] = useState<{ caseId: string; revision: number; rule: number; model?: string; reason?: string }>();
+  const [trace, setTrace] = useState<{
+    caseId: string; revision: number; rule: number; model?: string;
+    reason?: string; aiReason?: string; flags?: string[];
+  }>();
   const revision = targetCase?.backendRevision;
   const actorId = user?.id;
   const canTrace = user?.role === "ADMIN" || user?.role === "AUDITOR"
@@ -1934,7 +1913,8 @@ function CaseDetail() {
     }).catch(() => { if (!cancelled) setLiveHistory(undefined); });
     if (canTrace) void fetchBackendTrace(caseId).then((result) => {
       if (!cancelled) setTrace({ caseId, revision, rule: result.rule_version, model: result.payload.model_version,
-        reason: result.payload.reason });
+        reason: result.payload.reason, aiReason: result.payload.auditor_trace?.evaluate_trace?.routing_reason,
+        flags: result.payload.flags });
     }).catch(() => { if (!cancelled) setTrace(undefined); });
     return () => { cancelled = true; };
   }, [actorId, caseId, revision, canTrace]);
@@ -2174,6 +2154,35 @@ function CaseDetail() {
             </form>
           )}
 
+          {isLive && canTrace && Boolean(targetCase.documents?.length) && (
+            <section className="panel">
+              <PanelHeader title="Submitted evidence" />
+              <ul>
+                {targetCase.documents?.map((doc, index) => (
+                  <li key={doc.id}>
+                    <button type="button" className="outline-button" onClick={async () => {
+                      try {
+                        const blob = await downloadBackendEvidence(targetCase.id, doc.id);
+                        const url = URL.createObjectURL(blob);
+                        const link = document.createElement("a");
+                        const extension = doc.content_type === "application/pdf" ? "pdf"
+                          : doc.content_type === "image/png" ? "png" : "jpg";
+                        link.href = url;
+                        link.download = `${doc.type}-${index + 1}.${extension}`;
+                        link.click();
+                        setTimeout(() => URL.revokeObjectURL(url), 1000);
+                      } catch (error) {
+                        setActionNotice(error instanceof Error ? error.message : "Could not download evidence.");
+                      }
+                    }}>
+                      Download {doc.type === "identity_proof" ? "identity proof" : "income proof"} {index + 1}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
           <div className="panel timeline">
             <PanelHeader title="Chronological Case Timeline" />
             <ol className="timeline-list">
@@ -2206,7 +2215,11 @@ function CaseDetail() {
               </span>
             </div>
             <Badge tone={targetCase.tone}>Route: {targetCase.aiRoute}</Badge>
-            <h3>{targetCase.aiReason}</h3>
+            <h3>
+              {currentLang === "ur" && targetCase.aiReasonUr
+                ? <span lang="ur" dir="rtl">{targetCase.aiReasonUr}</span>
+                : targetCase.aiReason}
+            </h3>
             <p>
               Automated routing suggestions do not disburse public funds without
               authorized officer review.
@@ -2217,7 +2230,11 @@ function CaseDetail() {
             <div className="reason-list">
               <h4>Decision trace</h4>
               <p>Policy v{trace?.rule}{trace?.model && ` · Model ${trace.model}`}</p>
-              <p>{trace?.reason}</p>
+              {trace?.reason && <p>{trace.reason}</p>}
+              {trace?.aiReason && <p>{trace.aiReason}</p>}
+              {trace?.flags && trace.flags.length > 0 && (
+                <ul>{trace.flags.map((flag) => <li key={flag}>{flag.replace(/_/g, " ")}</li>)}</ul>
+              )}
             </div>
           )}
           {!isLive && <div className="reason-list">

@@ -20,10 +20,11 @@ Supabase credential for the database owner. Keep the database URL and all
 internal, AI, and provider keys on the server.
 
 Set `MOCK_BASE_URL` to the shared FastAPI host and set each of `NADRA_MOCK_KEY`,
-`RAAST_MOCK_KEY`, `SMS_MOCK_KEY`, and `INTERNAL_SERVICE_KEY`. For the synthetic
-demo, use `AGENT_MODE=deterministic` and `AI_STUB=true`. Validate the Member 2
-response contract and internal authentication before switching off AI stubs.
-Set `AI_API_KEY` separately if using Member 2's platform scam check integration.
+`RAAST_MOCK_KEY`, and `SMS_MOCK_KEY`. For Member 2 claim checks and Scam Shield,
+set `AI_STUB=false`, point `AI_BASE_URL` to the shared FastAPI host, and set
+`INTERNAL_SERVICE_KEY` and `AI_API_KEY` separately. Keep
+`AI_DUPLICATES_STRICT=true`. Use `AGENT_MODE=deterministic`.
+See [Member 2 integration](AI_INTEGRATION.md) for the environment and manual checks.
 
 Set `CORS_ORIGINS` to a comma-separated list of additional frontend origins.
 Set `VITE_API_URL` in the frontend build environment to the shared API URL.
@@ -44,11 +45,11 @@ for the new worker, and moves interrupted legacy processing to human review.
 The migration is forward only. Restore the backup if a rollback is required.
 The database must have the Supabase `anon` and `authenticated` roles.
 
-Copy `docs/demo-accounts.example.json` and replace the placeholders with the
+Copy [demo-accounts.example.json](demo-accounts.example.json) and replace the placeholders with the
 existing Supabase Auth UUIDs. Bind the application profiles and seed policy v1:
 
 ```bash
-(cd backend/platform/backend && python -m app.bootstrap --accounts ../docs/demo-accounts.json)
+(cd backend/platform/backend && python -m app.bootstrap --accounts ../../../docs/demo-accounts.json)
 ```
 
 This binds existing Auth users without changing their passwords or roles.
@@ -67,7 +68,7 @@ Members 3 and 4 can use the job and mock control admin APIs with an admin JWT.
 
 For the clean smoke test, file a synthetic claim for Muhammad Ali
 (`MOCK-123456`, `MOCK-ACCOUNT-001`) with income under policy and attach
-both an identity proof and an income proof. Use only test files. The optional
+both an identity proof and an income proof as sharp JPEG or PNG images. Use only test files. The optional
 synthetic number `+920000000001` exercises the SMS gateway. Confirm it reaches
 `cleared`, assign it to an officer, approve it, and wait for one confirmed mock
 payment. A case with no synthetic number receives in-app notices.

@@ -1,5 +1,5 @@
 # OWNER: Member 3
-# Mock Raast payment adapter. Safety rules (M3_CONTEXT.md):
+# Mock Raast payment adapter. Safety rules (docs/M3_CONTEXT.md):
 #  - pays ONLY for case status "approved" (officer-approved); "cleared" has no authority
 #  - idempotency key = "disburse-" + case_id, persisted in payment_requests BEFORE calling Raast
 #  - POST /disburse is attempted ONCE per call (never auto-retried); after a timeout or

@@ -30,6 +30,7 @@ export interface CaseRecord {
   backendRevision?: number;
   paymentStatus?: NonNullable<import("./api").BackendCase["payment"]>["status"];
   requiredDocuments?: import("./api").EvidenceType[];
+  documents?: import("./api").BackendCase["documents"];
   assignedOfficerId?: string | null;
   id: string;
   person: string;
@@ -50,6 +51,7 @@ export interface CaseRecord {
   submittedByRole: Role;
   aiRoute: string;
   aiReason: string;
+  aiReasonUr?: string;
   aiConfidence: number;
   nadraVerified?: boolean;
   nadraNote?: string;

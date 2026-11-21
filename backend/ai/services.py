@@ -132,7 +132,7 @@ def _b64(value: str) -> bytes:
 def extract_document(*, doc_type: Optional[str], content: Optional[bytes] = None, content_base64: Optional[str] = None,
                      file_path: Optional[str] = None, document_id: Optional[str] = None, text: Optional[str] = None,
                      reported_quality: Optional[float] = None, expected: Optional[Dict[str, Any]] = None,
-                     case_id: Any = None, document_id_for_reply: Optional[str] = None) -> Dict[str, Any]:
+                     case_id: Any = None, document_id_for_reply: Optional[str] = None, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     t = time.perf_counter()
     source = None
     if content is None and content_base64:
@@ -142,9 +142,19 @@ def extract_document(*, doc_type: Optional[str], content: Optional[bytes] = None
     if content is None and file_path:
         content, source = _read_upload(file_path), "file_path"
     if content is None and document_id and reported_quality is None and text is None:
-        found = data_sources.document_file(document_id)
+        if tenant_id and case_id is None:
+            raise ServiceError(422, "VALIDATION_ERROR", "case_id is required for platform evidence")
+        found = data_sources.document_file(document_id, case_id=case_id, tenant_id=tenant_id)
+        if tenant_id and (not found.ok or not found.rows):
+            raise ServiceError(503, "SERVICE_UNAVAILABLE", "The case evidence could not be retrieved", retryable=True)
         if found.ok and found.rows:
-            content, source = _read_upload(found.rows[0]["file_path"]), "platform_document"
+            try:
+                content = _read_upload(found.rows[0]["file_path"])
+            except (ServiceError, OSError):
+                if tenant_id:
+                    raise ServiceError(503, "SERVICE_UNAVAILABLE", "The case evidence is unavailable", retryable=True)
+                raise
+            source = "platform_document"
             doc_type = doc_type or found.rows[0].get("type")
     try:
         res = documents.analyse(doc_type, content, text=text, reported_quality=reported_quality, expected=expected)

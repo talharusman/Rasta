@@ -33,8 +33,9 @@ DOC_GOOD = 0.80          # document quality at or above this needs no new photo
 MAX_CONFIDENCE = 0.99    # the model never claims certainty
 
 CRITICAL = ("identity_not_verified", "identity_mismatch", "identity_not_found", "duplicate_claim",
-            "scam_suspected", "service_unavailable", "low_name_match", "name_match_unknown")
-PROOF = ("document_missing", "document_quality_low", "income_missing")
+            "scam_suspected", "service_unavailable", "low_name_match", "name_match_unknown",
+            "duplicate_check_incomplete", "document_pdf_review")
+PROOF = ("document_missing", "document_quality_low", "income_missing", "required_proof_missing")
 
 RISK_WEIGHTS = {
     "duplicate_claim": 0.60, "scam_suspected": 0.70, "identity_not_verified": 0.50,
@@ -236,10 +237,16 @@ NEXT = {
                      "ابھی آپ کو کچھ کرنے کی ضرورت نہیں۔ افسر آپ سے رابطہ کر سکتا ہے۔"),
 }
 REASONS = {
+    "document_pdf_review": ("We could not check the PDF automatically. An officer will review it.",
+                            "ہم پی ڈی ایف کی خودکار جانچ نہیں کر سکے۔ ایک افسر اسے دیکھے گا۔"),
+    "required_proof_missing": ("Some required evidence is missing. Please check the document list.",
+                                "کچھ ضروری ثبوت موجود نہیں ہیں۔ براہ کرم دستاویزات کی فہرست دیکھیں۔"),
+    "duplicate_check_incomplete": ("We could not finish checking for duplicate applications.",
+                                    "ہم ایک جیسی درخواستوں کی جانچ مکمل نہیں کر سکے۔"),
     "document_quality_low": ("The photo of your document was not clear enough to read.",
                              "آپ کی دستاویز کی تصویر واضح نہیں تھی۔"),
-    "document_missing": ("An identity document has not been added yet.",
-                         "شناختی دستاویز ابھی شامل نہیں کی گئی۔"),
+    "document_missing": ("We need a readable supporting document to continue.",
+                         "کارروائی جاری رکھنے کے لیے ہمیں ایک قابلِ مطالعہ دستاویز درکار ہے۔"),
     "income_missing": ("Your monthly income is missing from the application.",
                        "درخواست میں آپ کی ماہانہ آمدن درج نہیں ہے۔"),
     "name_match_uncertain": ("The name on your application is close to, but not the same as, the identity record.",
@@ -271,9 +278,9 @@ REASONS = {
                         "اس درخواست پر کارروائی کی اجازت واپس لے لی گئی ہے۔"),
 }
 # Most important first; at most MAX_REASONS shown to the citizen.
-ORDER = ("scam_suspected", "CONSENT_REVOKED", "CONSENT_REQUIRED", "identity_not_found", "identity_not_verified",
+ORDER = ("scam_suspected", "document_pdf_review", "duplicate_check_incomplete", "CONSENT_REVOKED", "CONSENT_REQUIRED", "identity_not_found", "identity_not_verified",
          "identity_mismatch", "low_name_match", "duplicate_claim", "name_match_uncertain", "name_match_unknown",
-         "income_above_limit", "eligibility_failed", "service_unavailable", "document_missing",
+         "income_above_limit", "eligibility_failed", "service_unavailable", "required_proof_missing", "document_missing",
          "document_quality_low", "income_missing")
 MAX_REASONS = 2
 

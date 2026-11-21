@@ -4,6 +4,8 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select
 
+from ai.decision import explain
+
 from .models import Audit, Case, Citizen, Consent, Decision, Document, Job, Notification, Rule
 from .services import (
     Actor, active_rule, change, evaluate, factory, fail, get_resource, roles, settings,
@@ -39,15 +41,22 @@ def _case(session, case_id, lock=False):
 def get_case(case_id):
     with factory()() as session:
         case = _case(session, case_id)
-        docs = session.scalars(select(Document).where(Document.case_id == case.id))
+        docs = session.scalars(select(Document).where(
+            Document.case_id == case.id, Document.tenant_id == case.tenant_id,
+        ).order_by(Document.created_at.desc(), Document.id.desc()))
+        latest = {}
+        for doc in docs:
+            latest.setdefault(doc.type, {'id': str(doc.id), 'type': doc.type, 'content_type': doc.content_type})
         return {
             'id': str(case.id), 'status': case.status, 'citizen_id': str(case.citizen_id),
+            'tenant_id': str(case.tenant_id), 'claim_type': case.claim_type,
+            'household_size': case.data.get('household_size'), 'required_documents': case.required_documents,
             'helper_id': str(case.helper_id) if case.helper_id else None,
             'mock_identity_id': case.data['mock_identity_id'], 'applicant_name': case.data['name'],
             'monthly_income': case.data['monthly_income'], 'account_id': case.data['payment_account'],
             'citizen_phone': case.data.get('citizen_phone'), 'approved_amount': case.approved_amount,
             'submission_count': case.processing_generation,
-            'documents': [{'id': str(d.id), 'type': d.type} for d in docs],
+            'documents': list(latest.values()),
         }
 
 
@@ -118,7 +127,7 @@ def get_active_rules(case_id, generation=None):
         case = _case(session, case_id)
         run = _ledger(session, case, generation, ('processing',))
         rule = get_resource(session, Rule, run.rule_version_id, case.tenant_id)
-        return {'version': str(rule.version), 'rules': [
+        return {**rule.conditions_json, 'version': rule.version, 'rules': [
             {'id': 'income_cap', 'field': 'monthly_income', 'op': 'lte',
              'value': rule.conditions_json['max_monthly_income']},
         ]}
@@ -189,17 +198,19 @@ def record_decision(case_id, decision):
                                          payload['flags'], payload['identity_verified'])
         rank = {'cleared': 0, 'needs_proof': 1, 'human_review': 2}
         route = max(payload['route'], policy_route, key=rank.__getitem__)
-        explanations = {
-            'needs_proof': 'We need a clearer document or additional information.',
-            'human_review': 'An officer will review your application.',
-        }
-        if route != payload['route']:
-            payload['user_explanation'] = explanations[route]
+        document_types = {'identity_proof', 'income_proof'}
+        requested = set(payload.get('requested_documents', [])) & document_types
+        payload['missing_evidence'] = sorted(set(payload['missing_evidence']) | set(missing) | requested)
+        if route != payload['route'] or not payload.get('user_explanation_ur'):
+            explanation_flags = list(payload['flags'])
+            if missing and 'required_proof_missing' not in explanation_flags:
+                explanation_flags.append('required_proof_missing')
+            payload.update({key: value for key, value in explain(route, explanation_flags).items()
+                            if key in ('user_explanation', 'user_explanation_ur')})
         payload.update(route=route, rule_version=rule.version)
-        payload['missing_evidence'] = sorted(set(payload['missing_evidence']) | set(missing))
-        case.required_documents = missing or (
-            ['identity_proof'] if route == 'needs_proof' else []
-        )
+        case.required_documents = sorted(set(missing) | requested)
+        if route == 'needs_proof' and not case.required_documents:
+            case.required_documents = ['identity_proof']
         session.add(Decision(tenant_id=case.tenant_id, case_id=case.id,
                              processing_generation=generation, rule_version_id=rule.id, payload=payload))
         run.state = 'completed'

@@ -99,6 +99,7 @@ class DocumentRef(_In):
 
 class ExtractIn(_In):
     case_id: CaseId = None
+    tenant_id: Optional[str] = None
     document: Optional[DocumentRef] = None
     document_type: Optional[str] = None
     content_base64: Optional[str] = None

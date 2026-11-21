@@ -349,11 +349,20 @@ export async function fetchBackendMetrics(): Promise<any> {
   return request<any>("/api/v1/metrics/summary");
 }
 
-export async function checkBackendScam(citizenId: string, text: string): Promise<any> {
-  return request<any>("/api/v1/scam-checks", {
+export interface ScamAssessment {
+  label: "likely_scam" | "uncertain" | "no_scam_indicators";
+  confidence: number;
+  indicators: string[];
+  explanation: string;
+  recommended_action: string;
+}
+
+export async function checkBackendScam(citizenId: string, text: string): Promise<ScamAssessment> {
+  const result = await request<{ payload: ScamAssessment }>("/api/v1/scam-checks", {
     method: "POST",
     body: JSON.stringify({ citizen_id: citizenId, text }),
   });
+  return result.payload;
 }
 
 // AI and Mocks integration
@@ -422,6 +431,7 @@ export interface BackendCase {
   created_at: string;
   claim_type: string;
   user_explanation: string | null;
+  user_explanation_ur?: string | null;
   required_documents: EvidenceType[];
   data: {
     name: string;
@@ -431,7 +441,7 @@ export interface BackendCase {
     payment_account: string;
     citizen_phone?: string | null;
   };
-  documents: { type: EvidenceType; file_name?: string; sha256: string }[];
+  documents: { id: string; type: EvidenceType; content_type: string; sha256: string }[];
   decision?: { route: string; confidence: number | null; identity_verified: boolean; rule_version: number; model_version: string | null };
   payment?: { status: "queued" | "pending" | "confirmed" | "failed"; amount: number | null; transaction_id: string | null } | null;
 }
@@ -456,6 +466,20 @@ export async function uploadBackendEvidence(caseId: string, revision: number, ty
   return request<{ revision: number }>(`/api/v1/cases/${caseId}/documents`, { method: "POST", body });
 }
 
+export async function downloadBackendEvidence(caseId: string, documentId: string): Promise<Blob> {
+  const token = getStoredToken();
+  if (!token || token.startsWith("demo.")) throw new Error("Sign in to view this document.");
+  const response = await fetch(
+    `${API_URL}/api/v1/cases/${encodeURIComponent(caseId)}/documents/${encodeURIComponent(documentId)}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new ApiError(response.status, body?.error?.message ?? "The document could not be downloaded.");
+  }
+  return response.blob();
+}
+
 export async function fetchBackendHistory(caseId: string) {
   return request<{ items: { id: string; action: string; notes: string; created_at: string }[] }>(
     `/api/v1/cases/${caseId}/history`
@@ -463,7 +487,13 @@ export async function fetchBackendHistory(caseId: string) {
 }
 
 export async function fetchBackendTrace(caseId: string) {
-  return request<{ rule_version: number; payload: { model_version?: string; reason?: string; flags?: string[] } }>(
-    `/api/v1/cases/${caseId}/decision-trace`
-  );
+  return request<{
+    rule_version: number;
+    payload: {
+      model_version?: string;
+      reason?: string;
+      flags?: string[];
+      auditor_trace?: { evaluate_trace?: { routing_reason?: string } | null };
+    };
+  }>(`/api/v1/cases/${caseId}/decision-trace`);
 }
