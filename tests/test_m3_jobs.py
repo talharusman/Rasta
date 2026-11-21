@@ -242,8 +242,7 @@ async def test_raast_outage_schedules_reconcile_then_exactly_one_payment(world):
     assert len(reconcile) == 1 and reconcile[0]["status"] == "queued"
     assert reconcile[0]["dedupe_key"] == "reconcile-case-1"
     assert world.count(MockTransaction) == 0
-    with world.factory() as s:
-        assert s.execute(select(PaymentRequest)).scalar_one().status == "unknown"
+    assert world.count(PaymentRequest) == 0  # the account could not be checked, so nothing was attempted
 
     control.set_conditions({"raast_outage": False})  # recovery
     open_breaker_cooldown(world.raast.http)
@@ -255,6 +254,58 @@ async def test_raast_outage_schedules_reconcile_then_exactly_one_payment(world):
     assert world.count(MockTransaction) == 1 and len(jobs_of("disburse_case")) == 1
     assert any(n["message"] == handlers.PAYMENT_SENT_MESSAGE and n["state"] == "delivered"
                for n in platform_bridge.STUB_NOTIFICATIONS)
+
+
+async def test_outage_during_the_payment_call_itself_leaves_an_unknown_row_then_reconciles(world):
+    """The account check passes, then Raast goes down exactly when we send the payment."""
+    add_case()
+    real_disburse = world.raast.http.request
+
+    async def outage_on_disburse(method, path, **kw):
+        if path == "/mock/raast/disburse":
+            control.set_conditions({"raast_outage": True})
+        return await real_disburse(method, path, **kw)
+
+    world.raast.http.request = outage_on_disburse
+    job = queue.enqueue_disbursement("case-1")
+    await worker.run_once()
+    assert queue.get_job(job["id"])["status"] == "done"
+    assert jobs_of("reconcile_payment")[0]["status"] == "queued" and world.count(MockTransaction) == 0
+    with world.factory() as s:
+        assert s.execute(select(PaymentRequest)).scalar_one().status == "unknown"
+
+    control.set_conditions({"raast_outage": False})
+    world.raast.http.request = real_disburse
+    open_breaker_cooldown(world.raast.http)
+    await drain(world)
+    assert world.count(MockTransaction) == 1
+
+
+@pytest.mark.parametrize("account,name,expected", [
+    ("MOCK-ACCOUNT-006", "Ayesha Siddiqui", "nomatch"),  # held by "A. Siddiqi Traders"
+    ("MOCK-ACCOUNT-404", "Muhammad Ali", "not_found"),
+])
+async def test_payment_account_mismatch_blocks_payment_and_goes_to_officer(world, account, name, expected):
+    add_case(account_id=account, applicant_name=name)
+    job = queue.enqueue_disbursement("case-1")
+    await worker.run_once()
+    got = queue.get_job(job["id"])
+    assert got["status"] == "failed" and got["attempts"] == 1  # no retry
+    assert "does not match" in got["last_error"]
+    assert world.count(MockTransaction) == 0 and world.count(PaymentRequest) == 0
+    blocked = audits("disburse_blocked_account_mismatch")
+    assert len(blocked) == 1 and blocked[0]["metadata"]["account_id"] == account
+    assert len(audits("job_failed")) == 1
+    assert platform_bridge.get_case("case-1")["status"] == "human_review"  # back to an officer
+    assert "Payment blocked" in platform_bridge.get_case("case-1")["last_note"]
+    assert await drain(world) == 0
+
+
+async def test_payment_without_beneficiary_name_fails_closed(world):
+    add_case(applicant_name=None)
+    job = queue.enqueue_disbursement("case-1")
+    await worker.run_once()
+    assert queue.get_job(job["id"])["status"] == "failed" and world.count(MockTransaction) == 0
 
 
 async def test_reconcile_retries_while_outage_continues(world):

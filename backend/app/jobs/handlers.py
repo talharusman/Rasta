@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from app.agent import orchestrator, platform_bridge
 from app.integrations.providers import registry
-from app.integrations.providers.base import NotificationStatus, PaymentResult, PaymentStatus
+from app.integrations.providers.base import AccountStatus, NotificationStatus, PaymentResult, PaymentStatus
 
 from .queue import JobFailedPermanently, aenqueue, merge_payload
 
@@ -111,6 +111,39 @@ async def _payment_details(case_id: str) -> Tuple[Any, str]:
     return amount, account
 
 
+class AccountValidationUnavailable(RuntimeError):
+    """Raast could not be asked who owns the account. Nothing was sent to it."""
+
+
+async def _prepare_payment(case_id: str) -> Tuple[Any, str]:
+    """Amount and account for an approved case, after checking that the account holder
+    matches the beneficiary (spec scenario 14: payment-account mismatch). An account that
+    does not match is never paid: the job fails without retry, it is audited, and the case
+    goes back to an officer. A case that is not approved is left for the payment adapter
+    to reject (it audits that itself)."""
+    amount, account = await _payment_details(case_id)
+    case = await _bridge(platform_bridge.get_case, case_id)
+    if str(case.get("status", "")).strip().lower() != "approved":
+        return amount, account
+    name = case.get("applicant_name") or case.get("name")
+    if not name:
+        raise JobFailedPermanently("cannot validate the payment account: the case has no beneficiary name")
+    check = await registry.get_payment_provider().validate_account(account, name, case_id)
+    if check.status == AccountStatus.matched:
+        return amount, account
+    if check.status == AccountStatus.unavailable:
+        raise AccountValidationUnavailable(f"account validation unavailable: {check.error}")
+    await _audit("disburse_blocked_account_mismatch", f"case:{case_id}",
+                 {"account_id": account, "account_check": check.status.value, "holder_name": check.holder_name})
+    try:  # more review is always the safe direction; if Member 1 forbids the move, the audit still stands
+        await _bridge(platform_bridge.transition_case, case_id, "human_review", "system",
+                      f"Payment blocked: account {account} is not held by the beneficiary "
+                      f"({check.status.value}, holder on record: {check.holder_name!r}).")
+    except Exception:
+        logger.exception("could not move case %s back to human_review", case_id)
+    raise JobFailedPermanently(f"payment account does not match the beneficiary ({check.status.value})")
+
+
 async def _payment_succeeded(case_id: str, result: PaymentResult) -> Dict[str, Any]:
     await _audit("payment_sent", f"case:{case_id}",
                  {"transaction_id": result.transaction_id, "idempotency_key": result.idempotency_key})
@@ -142,7 +175,13 @@ async def _handle_payment_result(case_id: str, result: PaymentResult, from_recon
 
 async def disburse_case(payload: Dict[str, Any], job: Dict[str, Any]) -> Dict[str, Any]:
     case_id = payload["case_id"]
-    amount, account = await _payment_details(case_id)  # raising here (e.g. M1 down) just retries
+    try:
+        amount, account = await _prepare_payment(case_id)  # raising here (e.g. M1 down) just retries
+    except AccountValidationUnavailable:
+        # Nothing was sent. Same safe path as an unknown payment: look again later (reconcile).
+        await aenqueue("reconcile_payment", {"case_id": case_id}, delay_seconds=RECONCILE_DELAY,
+                       dedupe_key=f"reconcile-{case_id}")
+        return {"payment": "not_attempted", "reconcile": "scheduled"}
     result = await registry.get_payment_provider().disburse(case_id, amount, account)
     return await _handle_payment_result(case_id, result, from_reconcile=False)
 
@@ -153,7 +192,7 @@ async def reconcile_payment(payload: Dict[str, Any], job: Dict[str, Any]) -> Dic
     result = await provider.reconcile_unknown(case_id)  # lookup only
     if result.status == PaymentStatus.failed and result.no_transaction_found:
         # Raast has nothing under our key: pay ONCE more, with the same key.
-        amount, account = await _payment_details(case_id)
+        amount, account = await _prepare_payment(case_id)  # same account check before the one re-pay
         again = await provider.disburse(case_id, amount, account)
         return await _handle_payment_result(case_id, again, from_reconcile=True)
     return await _handle_payment_result(case_id, result, from_reconcile=True)
