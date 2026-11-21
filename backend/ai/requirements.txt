@@ -1,1 +1,7 @@
 # Member 2: add your AI packages here (only here).
+rapidfuzz>=3.6,<4        # fuzzy name matching
+pillow>=10.1             # document image quality + synthetic test cards
+numpy>=1.26              # blur measurement (variance of the Laplacian)
+# Optional OCR (reads text from document images). Not required: without it the
+# document route still checks image quality and asks the citizen to type the fields.
+#   pip install pytesseract   + install the Tesseract program on your computer

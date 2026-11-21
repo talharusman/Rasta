@@ -1,0 +1,17 @@
+{
+  "note": "Synthetic OCR-style text (fictional people) with the fields a correct reader should extract. Measures field extraction separately from the OCR engine. null = the field is unreadable/invalid and must NOT be invented.",
+  "samples": [
+    {"type": "id_card", "text": "ISLAMIC REPUBLIC OF PAKISTAN (SPECIMEN)\nName: Muhammad Ali\nFather Name: Abdul Rahim\nIdentity Number: 42101-1234567-1\nDate of Birth: 12.05.1990", "expected": {"name": "Muhammad Ali", "father_name": "Abdul Rahim", "identity_number": "42101-1234567-1", "date_of_birth": "1990-05-12"}},
+    {"type": "id_card", "text": "SPECIMEN CARD\nNAME : ZENAB BIBI\nHUSBAND NAME : GHULAM NABI\nCNIC 35202-7654321-8\nDOB: 02/11/1988", "expected": {"name": "Zenab Bibi", "father_name": "Ghulam Nabi", "identity_number": "35202-7654321-8", "date_of_birth": "1988-11-02"}},
+    {"type": "id_card", "text": "Name: Rashid Khan\nFather's Name: Sher Khan\nID: MOCK-200002\nDate of Birth: ----", "expected": {"name": "Rashid Khan", "father_name": "Sher Khan", "identity_number": "MOCK-200002", "date_of_birth": null}},
+    {"type": "id_card", "text": "Name - Fatima Noor\nD/O: Noor Ahmed\n3740512345671\nBirth Date 1992-07-21", "expected": {"name": "Fatima Noor", "father_name": "Noor Ahmed", "identity_number": "37405-1234567-1", "date_of_birth": "1992-07-21"}},
+    {"type": "id_card", "text": "N@me: Ayesha Siddiqui\nFather Name: Siddique Ahmed\nIdentity Number: 61101-55512-1\nDate of Birth: 30.01.1995", "expected": {"name": null, "father_name": "Siddique Ahmed", "identity_number": null, "date_of_birth": "1995-01-30"}},
+    {"type": "id_card", "text": "Name: Hamza Qureshi\nFather Name: Muhammad Aslam\nIdentity Number: MOCK-100001\nDate of Birth: 31.13.1980", "expected": {"name": "Hamza Qureshi", "father_name": "Muhammad Aslam", "identity_number": "MOCK-100001", "date_of_birth": null}},
+    {"type": "income_proof", "text": "SALARY CERTIFICATE (SYNTHETIC)\nEmployer: Green Valley Textiles\nName: Bilal Ahmed\nNet Monthly Salary: Rs. 32,500", "expected": {"name": "Bilal Ahmed", "employer": "Green Valley Textiles", "monthly_income": 32500}},
+    {"type": "income_proof", "text": "Income statement\nName: Sana Malik\nMonthly income: PKR 18000\nCompany: Self-employed tailoring", "expected": {"name": "Sana Malik", "employer": "Self-employed tailoring", "monthly_income": 18000}},
+    {"type": "income_proof", "text": "Name: Usman Tariq\nEmployer: City Bakers\nSalary: (illegible)", "expected": {"name": "Usman Tariq", "employer": "City Bakers", "monthly_income": null}},
+    {"type": "utility_bill", "text": "ELECTRIC SUPPLY CO (SPECIMEN)\nName: Hina Parveen\nAddress: House 12, Street 4, Multan\nBilling Month: OCT-2026\nAmount Due: Rs 3,240", "expected": {"name": "Hina Parveen", "address": "House 12, Street 4, Multan", "billing_month": "OCT-2026", "amount_due": 3240}},
+    {"type": "utility_bill", "text": "GAS BILL\nName: Imran Shah\nAddress: Flat 3B, Block C, Karachi\nBill Month: Nov 2026\nTotal Payable: 1,850", "expected": {"name": "Imran Shah", "address": "Flat 3B, Block C, Karachi", "billing_month": "Nov 2026", "amount_due": 1850}},
+    {"type": "utility_bill", "text": "WATER BILL\nName: Maryam Javed\nAmount Due: Rs ---", "expected": {"name": "Maryam Javed", "address": null, "billing_month": null, "amount_due": null}}
+  ]
+}
