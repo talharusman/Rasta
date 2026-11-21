@@ -1,0 +1,33 @@
+{
+  "note": "Synthetic name pairs. expected: 'match' = same person, safe to auto-confirm (score must be >= 0.95); 'no_auto_match' = different person OR not confirmable (score must be < 0.95).",
+  "pairs": [
+    ["Muhammad Ali", "Muhammad Ali", "match"],
+    ["Mohammad Ali", "Muhammad Ali", "match"],
+    ["Zenab Bibi", "Zainab Bibi", "match"],
+    ["Ayesha Siddiqui", "Aisha Siddiqi", "match"],
+    ["Fatima Noor", "Fatimah Nur", "match"],
+    ["Hussain Ahmed", "Husain Ahmad", "match"],
+    ["Abdul Rehman", "Abdul Rahman", "match"],
+    ["MUHAMMAD USMAN", "muhammad usman", "match"],
+    ["Mr. Bilal Ahmed", "Bilal Ahmed", "match"],
+    ["Yousaf Khan", "Yusuf Khan", "match"],
+    ["Sana  Malik", "Sana Malik", "match"],
+    ["Hina Parveen", "Hina Perveen", "match"],
+    ["Muhammed Tariq", "Muhammad Tarik", "match"],
+    ["Rashid Khan", "Rashid Khan", "match"],
+    ["Zainab Khatoon", "Zenab Bibi", "no_auto_match"],
+    ["M. Afzal", "Muhammad Afzal", "no_auto_match"],
+    ["Ali Muhammad", "Muhammad Ali", "no_auto_match"],
+    ["Muhammad Ali", "Muhammad Ali Khan", "no_auto_match"],
+    ["Sana Malik", "Saima Malik", "no_auto_match"],
+    ["Imran Shah", "Irfan Shah", "no_auto_match"],
+    ["Bilal Ahmed", "Bilal Ahmed Qureshi", "no_auto_match"],
+    ["Fatima Noor", "Fatima Bibi", "no_auto_match"],
+    ["Hamza Qureshi", "Usman Tariq", "no_auto_match"],
+    ["Ayesha Siddiqui", "A. Siddiqi Traders", "no_auto_match"],
+    ["Kamran Aslam", "Kamran Akram", "no_auto_match"],
+    ["Nadia Hussain", "Nida Hussain", "no_auto_match"],
+    ["Muhammad Asif", "Muhammad Arif", "no_auto_match"],
+    ["", "Muhammad Ali", "no_auto_match"]
+  ]
+}

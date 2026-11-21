@@ -1,0 +1,31 @@
+{
+  "note": "Expected routes written by hand from the policy table (Execution Plan §4) with default thresholds clear=0.95, proof=0.70, max_income=50000 unless 'rules' is given. This is a SPEC CONFORMANCE check, not an independent accuracy estimate.",
+  "cases": [
+    {"id": "clean", "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": 0.95, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "cleared"},
+    {"id": "spelling_variant", "input": {"identity_verified": true, "name_match_score": 0.97, "document_quality": 0.9, "duplicate_flag": false, "scam_flag": false, "monthly_income": 30000}, "expected": "cleared"},
+    {"id": "initial_only", "input": {"identity_verified": true, "name_match_score": 0.87, "document_quality": 0.95, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "name_mismatch", "input": {"identity_verified": true, "name_match_score": 0.59, "document_quality": 0.95, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "no_document", "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": null, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "needs_proof"},
+    {"id": "blurry_document", "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": 0.3, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "needs_proof"},
+    {"id": "duplicate", "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": 0.95, "duplicate_flag": true, "scam_flag": false, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "scam", "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": 0.95, "duplicate_flag": false, "scam_flag": true, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "identity_not_verified", "input": {"identity_verified": false, "name_match_score": 1.0, "document_quality": 0.95, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "name_unknown", "input": {"identity_verified": true, "name_match_score": null, "document_quality": 0.95, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "income_above_limit", "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": 0.95, "duplicate_flag": false, "scam_flag": false, "monthly_income": 90000}, "expected": "human_review"},
+    {"id": "income_missing", "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": 0.95, "duplicate_flag": false, "scam_flag": false, "monthly_income": null}, "expected": "needs_proof"},
+    {"id": "fair_document", "input": {"identity_verified": true, "name_match_score": 0.96, "document_quality": 0.55, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "needs_proof"},
+    {"id": "good_document", "input": {"identity_verified": true, "name_match_score": 0.96, "document_quality": 0.81, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "cleared"},
+    {"id": "boundaries_exact", "input": {"identity_verified": true, "name_match_score": 0.95, "document_quality": 0.8, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "cleared"},
+    {"id": "name_just_below", "input": {"identity_verified": true, "name_match_score": 0.94, "document_quality": 1.0, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "no_doc_uncertain_name", "input": {"identity_verified": true, "name_match_score": 0.85, "document_quality": null, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "duplicate_no_doc", "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": null, "duplicate_flag": true, "scam_flag": false, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "verified_missing", "input": {"name_match_score": 1.0, "document_quality": 0.95, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "income_at_limit", "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": 0.95, "duplicate_flag": false, "scam_flag": false, "monthly_income": 50000}, "expected": "cleared"},
+    {"id": "unreadable_document", "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": 0.0, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "needs_proof"},
+    {"id": "scam_no_doc", "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": null, "duplicate_flag": false, "scam_flag": true, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "partial_name_no_doc", "input": {"identity_verified": true, "name_match_score": 0.72, "document_quality": null, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "zero_income", "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": 0.95, "duplicate_flag": false, "scam_flag": false, "monthly_income": 0}, "expected": "cleared"},
+    {"id": "strict_policy_unreadable_doc", "rules": {"clear_confidence_min": 0.95, "proof_confidence_min": 0.85}, "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": 0.0, "duplicate_flag": false, "scam_flag": false, "monthly_income": 20000}, "expected": "human_review"},
+    {"id": "lower_income_cap_v2", "rules": {"max_monthly_income": 45000}, "input": {"identity_verified": true, "name_match_score": 1.0, "document_quality": 0.95, "duplicate_flag": false, "scam_flag": false, "monthly_income": 48000}, "expected": "human_review"}
+  ]
+}
