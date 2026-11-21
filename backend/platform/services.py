@@ -12,13 +12,14 @@ import httpx
 import jwt
 from fastapi import Depends, Header, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from shared import db as shared_db
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from .models import (
     User, Citizen, Case, Consent, Rule, Decision,
-    History, Audit, Document, Job, ScamCheck, Notification
+    History, Audit, Document
 )
 
 
@@ -33,7 +34,9 @@ class Settings(BaseSettings):
     supabase_publishable_key: str = ''
     supabase_jwt_audience: str = 'authenticated'
     supabase_jwt_algorithm: str = 'ES256'
-    cors_origins: list[str] = ['http://localhost:5173']
+    cors_origins: str = ''
+    demo_tenant_id: uuid.UUID = uuid.UUID('11111111-1111-4111-8111-111111111111')
+    demo_payout_amount: int = Field(default=25000, gt=0)
     internal_api_key: str = ''
     ai_base_url: str = ''
     ai_api_key: str = ''
@@ -61,10 +64,7 @@ def fail(status: int, code: str, message: str = 'Access not permitted', retryabl
 def factory():
     if not settings.database_url:
         fail(503, 'SERVICE_UNAVAILABLE', 'DATABASE_URL is not configured', True)
-    return sessionmaker(
-        create_engine(settings.database_url, pool_pre_ping=True, pool_size=5, max_overflow=5),
-        expire_on_commit=False
-    )
+    return shared_db.SessionLocal
 
 
 def db():
@@ -77,7 +77,7 @@ def db():
             raise
 
 
-DB = Annotated[Session, Depends(db)]
+DB = Annotated[Session, Depends(db, scope="function")]
 
 
 # --- Supabase Auth & JWT Verification ---
@@ -130,7 +130,7 @@ def roles(user: User, *allowed: str):
 def get_resource(session: Session, model, identifier: uuid.UUID, tenant: uuid.UUID, lock: bool = False):
     query = select(model).where(model.id == identifier, model.tenant_id == tenant)
     if lock:
-        query = query.with_for_update()
+        query = query.with_for_update().execution_options(populate_existing=True)
     value = session.scalar(query)
     if not value:
         fail(404, 'NOT_FOUND', 'Resource not found')
@@ -199,7 +199,7 @@ def audit(session: Session, request: Request, action: str, resource, details: di
     ))
 
 
-def change(session: Session, request: Request, case: Case, status: str, notes: str = '', action: str = 'transition'):
+def change(session: Session, request: Request, case: Case, status: str, notes: str = '', action: str = 'transition', actor_type: str = 'user'):
     previous = case.status
     case.status = status
     case.revision += 1
@@ -212,7 +212,7 @@ def change(session: Session, request: Request, case: Case, status: str, notes: s
         status=status,
         notes=notes
     ))
-    audit(session, request, action, case.id, {'previous_status': previous, 'status': status, 'notes': notes})
+    audit(session, request, action, case.id, {'previous_status': previous, 'status': status, 'notes': notes}, actor_type=actor_type)
 
 
 def verify_revision(case: Case, expected: int):
@@ -230,8 +230,12 @@ def dump(row, exclude=()):
 def detail(session: Session, case: Case):
     value = dump(case, ('request_hash', 'idempotency_key'))
     value['case_id'] = value.pop('id')
-    dec = session.scalar(select(Decision).where(Decision.case_id == case.id).order_by(Decision.created_at.desc()))
+    dec = session.scalar(select(Decision).where(Decision.case_id == case.id, Decision.processing_generation == case.processing_generation))
     value['user_explanation'] = dec.payload['user_explanation'] if dec else None
+    if dec:
+        value['decision'] = {key: dec.payload.get(key) for key in (
+            'route', 'confidence', 'identity_verified', 'rule_version', 'model_version'
+        )}
     value['documents'] = [dump(d, ('file_path', 'tenant_id')) for d in session.scalars(select(Document).where(Document.case_id == case.id))]
     return value
 
@@ -243,14 +247,18 @@ def active_rule(session: Session, tenant: uuid.UUID):
     return rule
 
 
-def evaluate(session: Session, case: Case, rule: Rule, confidence: float, flags: list[str], identity_verified: bool):
+def evaluate(session: Session, case: Case, rule: Rule, confidence: float | None, flags: list[str], identity_verified: bool):
     policy = rule.conditions_json
     docs = set(session.scalars(select(Document.type).where(Document.case_id == case.id)))
     missing = sorted((set(policy['required_documents']) | set(case.required_documents or [])) - docs)
-    critical = {'identity_mismatch', 'potential_duplicate', 'fraud_indicator', 'identity_service_unavailable'} | set(policy.get('critical_flags', []))
+    critical = {
+        'identity_mismatch', 'identity_not_found', 'identity_service_unavailable',
+        'duplicate_claim', 'potential_duplicate', 'fraud_indicator', 'scam_suspected',
+        'service_unavailable',
+    } | set(policy.get('critical_flags', []))
     if not identity_verified or critical.intersection(flags) or case.data.get('monthly_income', 0) > policy['max_monthly_income']:
         route = 'human_review'
-    elif confidence < policy['proof_confidence_min']:
+    elif confidence is None or confidence < policy['proof_confidence_min']:
         route = 'human_review'
     elif missing:
         route = 'needs_proof'
@@ -308,18 +316,7 @@ def auth_call(path: str, payload: dict):
         fail(503, 'SERVICE_UNAVAILABLE', 'Supabase Auth unavailable', True)
 
 
-def locked_run(session: Session, identifier: uuid.UUID):
-    job = session.get(Job, identifier)
-    if not job:
-        fail(404, 'NOT_FOUND')
-    case = get_resource(session, Case, job.case_id, job.tenant_id)
-    citizen = get_resource(session, Citizen, case.citizen_id, job.tenant_id, True)
-    case = get_resource(session, Case, case.id, job.tenant_id, True)
-    job = get_resource(session, Job, identifier, job.tenant_id, True)
-    return job, case, citizen
-
-
-# --- Pydantic Request/Response Schemas ---
+# --- Request Schemas ---
 class Input(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
@@ -339,6 +336,7 @@ class ClaimData(Input):
     monthly_income: int = Field(ge=0)
     household_size: int = Field(ge=1, le=100)
     payment_account: str = Field(pattern=r'^MOCK-', max_length=100)
+    citizen_phone: str | None = Field(default=None, pattern=r'^\+920[0-9]{9}$')
 
 
 class CreateCase(Input):
@@ -418,15 +416,3 @@ class CaseRef(Input):
 class Scam(Input):
     citizen_id: uuid.UUID
     text: str = Field(min_length=1, max_length=5000)
-
-
-class Result(Input):
-    route: Literal['cleared', 'needs_proof', 'human_review']
-    confidence: float = Field(ge=0, le=1)
-    risk_score: float = Field(ge=0, le=1)
-    flags: list[str]
-    rule_version: int
-    model_version: str = Field(min_length=1, max_length=100)
-    user_explanation: str = Field(min_length=1, max_length=2000)
-    auditor_trace: dict
-    identity_verified: bool

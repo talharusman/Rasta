@@ -70,6 +70,13 @@ def heartbeat_age_seconds() -> Optional[float]:
 
 def _audit_failed(job: Dict[str, Any], error: str) -> None:
     try:
+        if platform_bridge.is_live():
+            payload = job.get("payload") or {}
+            if job["kind"] in ("send_notification", "check_delivery") and payload.get("notification_id"):
+                platform_bridge.update_notification_state(payload["notification_id"], "failed")
+            if job["kind"] == "process_case":
+                platform_bridge.live_call("stop_processing", payload["case_id"], payload.get("generation"),
+                                          "Processing stopped after the worker exhausted its retries")
         platform_bridge.log_audit(
             "system", "job_worker", "job_failed", f"job:{job['id']}",
             {"kind": job["kind"], "attempts": job["attempts"], "max_attempts": job["max_attempts"],

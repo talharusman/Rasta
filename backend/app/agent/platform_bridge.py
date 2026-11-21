@@ -1,23 +1,4 @@
-# OWNER: Member 3
-# Bridge to Member 1's platform functions (see M3_CONTEXT.md).
-#
-# Each function first looks for Member 1's REAL implementation; if it is not there
-# yet it falls back to an in-memory STUB so Member 3 can test today.
-# Callers must use module attributes (platform_bridge.get_case(...)), never
-# "from ... import get_case", so tests can monkeypatch them.
-#
-# TODO(M1): Member 1's package is loaded by backend/main.py under the name
-# "rasta_platform". Put the module(s) that will expose these functions in
-# _M1_MODULES (first match wins), keeping the names and signatures below:
-#   get_case(case_id) -> dict              (status as a lowercase state name)
-#   check_consent(citizen_id, grantee_id, scope) -> bool | {"granted": bool, "reason": ...}
-#   get_active_rules() -> {"version": str, "rules": [...]}
-#   evaluate_rules(case, rules) -> {eligible, rule_version, failed_rules, missing_fields}
-#   record_decision(case_id, decision: dict)
-#   transition_case(case_id, to_status, actor, note)
-#   log_audit(actor_type, actor_id, action, resource, metadata)
-#   create_notification(case_id, recipient, message)
-import importlib
+"""Database bridge configured by the live app, with isolated test stubs."""
 import logging
 import os
 import secrets
@@ -28,34 +9,37 @@ from fastapi import Header, HTTPException
 
 logger = logging.getLogger("m3.platform_bridge")
 
-_M1_MODULES = ("rasta_platform.services",)  # TODO(M1): confirm the real module path(s)
-
 CASE_STATES = (
     "draft", "submitted", "processing", "cleared", "needs_proof",
     "human_review", "approved", "rejected", "closed",
 )
 
-_RESOLVED: Dict[str, Optional[Callable]] = {}
+_implementation = None
+
+
+def configure(implementation) -> None:
+    global _implementation
+    _implementation = implementation
+
+
+def is_live() -> bool:
+    return _implementation is not None
 
 
 def _real(name: str) -> Optional[Callable]:
-    """Member 1's real function, or None (then the stub is used). Cached."""
-    if name not in _RESOLVED:
-        found = None
-        for module_name in _M1_MODULES:
-            try:
-                found = getattr(importlib.import_module(module_name), name, None)
-            except ImportError:
-                found = None
-            if found:
-                break
-        _RESOLVED[name] = found
-    return _RESOLVED[name]
+    if not is_live():
+        return None
+    return getattr(_implementation, name)
+
+
+def live_call(name, *args):
+    if not is_live():
+        raise RuntimeError("Platform bridge is not configured")
+    return getattr(_implementation, name)(*args)
 
 
 def reset_resolution() -> None:
-    """Forget cached lookups (e.g. after Member 1's module becomes importable)."""
-    _RESOLVED.clear()
+    """Compatibility with standalone test fixtures; lookup is no longer cached."""
 
 
 # ---------------------------------------------------------------------------
@@ -137,10 +121,10 @@ def check_consent(citizen_id: str, grantee_id: str, scope: str) -> Dict[str, Any
     return {"granted": False, "reason": "CONSENT_REVOKED" if state == "revoked" else "CONSENT_REQUIRED"}
 
 
-def get_active_rules() -> Dict[str, Any]:
+def get_active_rules(case_id=None, generation=None) -> Dict[str, Any]:
     fn = _real("get_active_rules")
     if fn:
-        return fn()
+        return fn(case_id, generation)
     return dict(DEFAULT_RULES)
 
 
@@ -156,7 +140,7 @@ def evaluate_rules(case: Dict[str, Any], rules: Dict[str, Any]) -> Dict[str, Any
     """-> {eligible, rule_version, failed_rules: [], missing_fields: []}.
     Rule shape: {"id", "field", "op": lte|lt|gte|gt|eq|ne|in|present, "value"}.
     A rule whose field is missing is a missing field, never a pass."""
-    fn = _real("evaluate_rules")
+    fn = getattr(_implementation, "evaluate_rules", None)
     if fn:
         return fn(case, rules)
     failed: List[str] = []
@@ -229,11 +213,11 @@ def log_audit(
     logger.info("AUDIT (stub) %s", entry)
 
 
-def create_notification(case_id: str, recipient: str, message: str) -> Optional[str]:
+def create_notification(case_id: str, recipient: str, message: str, key=None) -> Optional[str]:
     """Returns the notification id (None if Member 1's function returns nothing)."""
     fn = _real("create_notification")
     if fn:
-        return fn(case_id, recipient, message)
+        return fn(case_id, recipient, message, key)
     with _LOCK:
         notification_id = f"notif-{len(STUB_NOTIFICATIONS) + 1}"
         STUB_NOTIFICATIONS.append({"id": notification_id, "case_id": case_id, "recipient": recipient,

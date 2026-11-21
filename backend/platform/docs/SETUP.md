@@ -1,6 +1,6 @@
 # Setup and credentials
 
-This guide contains commands for you to execute later. None were run during implementation. Use Python 3.12 and a dedicated nonproduction Supabase project. Use fabricated data only.
+Use Python 3.12 and a dedicated nonproduction Supabase project. Use fabricated data only.
 
 ## 1. Supabase configuration
 
@@ -11,81 +11,68 @@ This guide contains commands for you to execute later. None were run during impl
 5. Use SQLAlchemy's `postgresql+psycopg://` scheme and append `?sslmode=require`. Do not use the transaction pooler for this initial setup.
 6. In Auth's user management, manually create and confirm five demo accounts: citizen, helper, officer, admin and auditor. Save their Auth user UUIDs. Keep passwords outside the repository. Disable public signup if the project is demo-only.
 
-## 2. Local installation
+## 2. Configure the shared API
 
-From the repository root:
+From the repository root, install the backend requirements and configure the root
+`.env` using `.env.example`. Set the Supabase URL, publishable key, signing
+algorithm, and PostgreSQL connection string for the same project. Use the
+Supabase credential for the database owner. Keep the database URL and all
+internal, AI, and provider keys on the server.
 
-```bash
-cd backend
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
-cp .env.example .env
-```
+Set `MOCK_BASE_URL` to the shared FastAPI host and set each of `NADRA_MOCK_KEY`,
+`RAAST_MOCK_KEY`, `SMS_MOCK_KEY`, and `INTERNAL_SERVICE_KEY`. For the synthetic
+demo, use `AGENT_MODE=deterministic` and `AI_STUB=true`. Validate the Member 2
+response contract and internal authentication before switching off AI stubs.
+Set `AI_API_KEY` separately if using Member 2's platform scam check integration.
 
-Populate `.env`:
+Set `CORS_ORIGINS` to a comma-separated list of additional frontend origins.
+Set `VITE_API_URL` in the frontend build environment to the shared API URL.
+Configure a persistent private volume for `UPLOAD_DIR` when deploying.
 
-```dotenv
-DATABASE_URL=postgresql+psycopg://postgres.PROJECT_REF:ENCODED_PASSWORD@SESSION_POOLER_HOST:5432/postgres?sslmode=require
-SUPABASE_URL=https://PROJECT_REF.supabase.co
-SUPABASE_PUBLISHABLE_KEY=YOUR_PUBLISHABLE_KEY
-SUPABASE_JWT_AUDIENCE=authenticated
-SUPABASE_JWT_ALGORITHM=ES256
-CORS_ORIGINS=["http://localhost:5173"]
-INTERNAL_API_KEY=GENERATE_A_LONG_RANDOM_SERVER_ONLY_SECRET
-AI_BASE_URL=
-AI_API_KEY=
-UPLOAD_DIR=uploads
-```
+## 3. Migrate and seed
 
-Use the exact host/user/port Supabase provides; the connection string above is illustrative. Generate a service secret with a password manager or `openssl rand -hex 32`. Never expose the database URL, internal key, AI key, or tokens in frontend configuration or source control.
-
-`AI_BASE_URL` is the root URL of Member 2's service, without `/internal/ai`; the backend appends `/internal/ai/scam-check`. `AI_API_KEY` must match that service's accepted `X-API-Key`. Leave both blank until the service exists; scam checks then return 503 rather than invented results. No OpenAI credential is needed by Member 1.
-
-## 3. Apply the schema deliberately
-
-Review the initial migration, then run against the intended nonproduction Supabase project:
+Stop the old API and worker and take a database backup before the queue cutover.
+From the repository root, with the backend virtual environment activated:
 
 ```bash
-alembic upgrade head
+(cd backend/platform/backend && alembic upgrade head)
+(cd backend && python -m app.integrations.mocks.fixtures)
 ```
 
-Run migrations using the database owner from Supabase. The migration enables RLS and revokes `anon` and `authenticated` table privileges. FastAPI uses the owner connection and must enforce all application authorization itself. The browser must not query these tables directly.
+The second revision preserves the old processing ledger, queues submitted work
+for the new worker, and moves interrupted legacy processing to human review.
+The migration is forward only. Restore the backup if a rollback is required.
+The database must have the Supabase `anon` and `authenticated` roles.
 
-The first migration uses the current SQLAlchemy metadata. Freeze its table definitions before adding subsequent migrations; later model edits must not silently change the meaning of revision 0001.
-
-## 4. Bind the demo users
-
-Copy `docs/demo-accounts.example.json` to a local file. Replace every placeholder with the corresponding existing Supabase Auth UUID. Keep all five users under one synthetic tenant UUID. From `backend`:
+Copy `docs/demo-accounts.example.json` and replace the placeholders with the
+existing Supabase Auth UUIDs. Bind the application profiles and seed policy v1:
 
 ```bash
-python -m app.bootstrap --accounts /absolute/path/to/demo-accounts.json
+(cd backend/platform/backend && python -m app.bootstrap --accounts ../docs/demo-accounts.json)
 ```
 
-This inserts application profiles, one citizen profile, and synthetic policy version 1. It does not create Supabase Auth accounts, set passwords, or alter existing roles. To demonstrate helper switching, create a second citizen Auth account and include it in the JSON before running bootstrap again.
+This binds existing Auth users without changing their passwords or roles.
+The tenant ID in that file must match `DEMO_TENANT_ID` for mock controls.
 
-## 5. Run the API
+## 4. Start the shared API and worker
 
 ```bash
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+(cd backend && RUN_JOB_WORKER=true uvicorn main:app --host 127.0.0.1 --port 8000)
 ```
 
-Open `http://localhost:8000/docs`. Login through `/api/v1/auth/login`, copy the access token, and use Swagger's Authorize control with a bearer token. Get the application's current role and citizen UUID from `/api/v1/auth/me`.
+Enable the worker on exactly one process. Other API processes can use
+`RUN_JOB_WORKER=false`. Use `/health` for liveness and `/ready` for database
+schema, auth configuration, and heartbeat checks when the worker is enabled.
+Members 3 and 4 can use the job and mock control admin APIs with an admin JWT.
 
-`/health` is configuration-independent. `/ready` checks database connectivity and basic auth configuration; it does not certify that the AI service or worker is available.
+For the clean smoke test, file a synthetic claim for Muhammad Ali
+(`MOCK-123456`, `MOCK-ACCOUNT-001`) with income under policy and attach
+both an identity proof and an income proof. Use only test files. The optional
+synthetic number `+920000000001` exercises the SMS gateway. Confirm it reaches
+`cleared`, assign it to an officer, approve it, and wait for one confirmed mock
+payment. A case with no synthetic number receives in-app notices.
 
-## 6. Team integration
-
-Member 4 calls only `/api/v1`. Configure its origin in `CORS_ORIGINS`. Member 3 supplies a persistent uploads volume at `UPLOAD_DIR`; private evidence is served only by authorized API routes.
-
-Member 3's worker polls `GET /internal/jobs` using `X-API-Key: INTERNAL_API_KEY`, starts a job, calls identity/AI adapters, and posts its result or failure. Submission only queues work; no worker is started by this repository. Until Member 3 integrates a worker, cases remain submitted.
-
-The worker must recheck consent before every provider call by requesting the start endpoint again. Stop on consent denial or stale generation. Start is replayable while processing. Call the failure endpoint on exhausted provider errors. There is no automatic retry scheduler or worker lease recovery in this implementation.
-
-Mock Raast must consult `/internal/cases/{id}/payment-authorization` immediately before simulated transfer and independently enforce payment idempotency. No payment or notification is sent by this backend.
-
-## 7. Before using the integrated demo
-
-The user requested no testing during authoring. Installation, imports, schema compatibility and runtime behavior remain unverified. Run the acceptance scenarios in the implementation-status document once credentials and Member 2/3 services are ready.
-
-Important current limits: one global internal worker key; no per-service scopes, request throttling or automatic job lease recovery; offset pagination; synthetic local evidence storage; no automatic notification enqueue; processing claims from the trusted worker are not independently verified against signed identity-provider evidence. Do not expose internal routes publicly without an infrastructure access restriction. Approval is deliberately conservative: unresolved identity/critical/evidence failures require successful reprocessing before approval.
+The previous polling callbacks under `/internal/jobs/{id}/start`,
+`/decision`, and `/fail` have been retired. The shared app runs the durable
+worker directly. Internal job and agent routes accept `X-Service-Key` and must
+be reachable only to trusted services.

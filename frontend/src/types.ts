@@ -26,6 +26,11 @@ export interface TimelineEntry {
 }
 
 export interface CaseRecord {
+  backendStatus?: import("./api").BackendCase["status"];
+  backendRevision?: number;
+  paymentStatus?: NonNullable<import("./api").BackendCase["payment"]>["status"];
+  requiredDocuments?: import("./api").EvidenceType[];
+  assignedOfficerId?: string | null;
   id: string;
   person: string;
   cnic: string;
@@ -35,7 +40,7 @@ export interface CaseRecord {
   householdMembers: number;
   address: string;
   notes?: string;
-  status: "Submitted" | "Needs review" | "More information" | "Verified" | "Rejected";
+  status: "Draft" | "Submitted" | "Processing" | "Checks passed" | "Needs review" | "More information" | "Verified" | "Rejected" | "Closed";
   priority: "P1" | "P2" | "P3";
   score: string;
   tone: "warning" | "success" | "muted" | "neutral" | "danger";

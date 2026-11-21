@@ -15,12 +15,15 @@ class Role(str, Enum):
 
 
 class CaseState(str, Enum):
-    SUBMITTED = "SUBMITTED"
-    NEEDS_INFO = "NEEDS_INFO"
-    IN_REVIEW = "IN_REVIEW"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
-    PAID = "PAID"
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
+    PROCESSING = "processing"
+    CLEARED = "cleared"
+    NEEDS_PROOF = "needs_proof"
+    HUMAN_REVIEW = "human_review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CLOSED = "closed"
 
 
 class Route(str, Enum):

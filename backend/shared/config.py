@@ -5,7 +5,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+root = Path(__file__).resolve().parents[2]
+load_dotenv(root / ".env")
+load_dotenv(root / "backend/platform/backend/.env")
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/rasta"

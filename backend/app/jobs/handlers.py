@@ -36,9 +36,15 @@ async def _audit(action: str, resource: str, metadata: Dict[str, Any]) -> None:
 
 # ---------------------------------------------------------------------------
 async def process_case(payload: Dict[str, Any], job: Dict[str, Any]) -> Dict[str, Any]:
-    run = await orchestrator.process_case(payload["case_id"], triggered_by="job")
-    # The agent never raises and always leaves the case somewhere safe, so even a
-    # "failed" run is a finished job (re-running would just be skipped).
+    run = await orchestrator.process_case(payload["case_id"], triggered_by="job", generation=payload.get("generation"))
+    if platform_bridge.is_live():
+        if run["status"] == "running":
+            raise RuntimeError("An earlier agent run is still finishing")
+        if run["status"] == "failed":
+            case = await _bridge(platform_bridge.get_case, payload["case_id"])
+            if case["status"] in ("submitted", "processing") and case["submission_count"] == payload.get("generation"):
+                raise RuntimeError("Could not persist the processing outcome")
+        await asyncio.to_thread(merge_payload, job["id"], {"agent_run_id": run["id"]})
     return {"run_id": run["id"], "run_status": run["status"]}
 
 
@@ -47,11 +53,16 @@ async def send_notification(payload: Dict[str, Any], job: Dict[str, Any]) -> Dic
     case_id, recipient, message = payload["case_id"], payload["recipient"], payload["message"]
     notification_id = payload.get("notification_id")
     if notification_id is None:
-        notification_id = await _bridge(platform_bridge.create_notification, case_id, recipient, message)
+        if platform_bridge.is_live():
+            notification_id = await _bridge(platform_bridge.create_notification, case_id, recipient, message,
+                                            f"notify-job-{job['id']}")
+        else:
+            notification_id = await _bridge(platform_bridge.create_notification, case_id, recipient, message)
         if notification_id is not None:  # remember it so a retry does not create a second one
             await asyncio.to_thread(merge_payload, job["id"], {"notification_id": notification_id})
 
-    sent = await registry.get_notification_provider().send(recipient, message, case_id)
+    dedupe = {"idempotency_key": f"sms-{job['id']}"} if platform_bridge.is_live() else {}
+    sent = await registry.get_notification_provider().send(recipient, message, case_id, **dedupe)
     if sent.status != NotificationStatus.sent or not sent.message_id:
         raise RuntimeError(f"SMS not sent ({sent.status.value}): {sent.error}")
     if notification_id is not None:
@@ -81,7 +92,8 @@ async def check_delivery(payload: Dict[str, Any], job: Dict[str, Any]) -> Dict[s
         raise RuntimeError(f"delivery not confirmed ({result.status.value}): {result.error}")
 
     if payload.get("resends", 0) < MAX_RESENDS:  # undeliverable: send ONE more time
-        again = await provider.send(payload["recipient"], payload["message"], case_id)
+        dedupe = {"idempotency_key": f"sms-resend-{job['id']}"} if platform_bridge.is_live() else {}
+        again = await provider.send(payload["recipient"], payload["message"], case_id, **dedupe)
         if again.status != NotificationStatus.sent or not again.message_id:
             raise RuntimeError(f"re-send failed ({again.status.value}): {again.error}")
         await set_state("resent", again.message_id)
@@ -100,9 +112,9 @@ async def check_delivery(payload: Dict[str, Any], job: Dict[str, Any]) -> Dict[s
 async def _payment_details(case_id: str) -> Tuple[Any, str]:
     """Amount and account from the case, falling back to the active rules."""
     case = await _bridge(platform_bridge.get_case, case_id)
-    rules = await _bridge(platform_bridge.get_active_rules)
     amount = next((case[k] for k in ("approved_amount", "amount") if case.get(k) not in (None, "")), None)
-    if amount is None:
+    if amount is None and not platform_bridge.is_live():
+        rules = await _bridge(platform_bridge.get_active_rules)
         amount = (rules or {}).get("payout_amount")
     account = case.get("account_id")
     if amount is None or not account:
@@ -115,7 +127,12 @@ async def _payment_succeeded(case_id: str, result: PaymentResult) -> Dict[str, A
     await _audit("payment_sent", f"case:{case_id}",
                  {"transaction_id": result.transaction_id, "idempotency_key": result.idempotency_key})
     case = await _bridge(platform_bridge.get_case, case_id)
-    recipient = case.get("citizen_phone") or case.get("phone") or str(case.get("citizen_id"))
+    recipient = case.get("citizen_phone") or case.get("phone")
+    if platform_bridge.is_live() and not recipient:
+        await _bridge(platform_bridge.create_notification, case_id, str(case["citizen_id"]),
+                      PAYMENT_SENT_MESSAGE, f"notify-payment-{case_id}")
+        return {"payment": "success", "transaction_id": result.transaction_id}
+    recipient = recipient or str(case.get("citizen_id"))
     await aenqueue("send_notification",
                    {"case_id": case_id, "recipient": recipient, "message": PAYMENT_SENT_MESSAGE},
                    dedupe_key=f"notify-payment-{case_id}")
