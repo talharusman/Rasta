@@ -1,4 +1,4 @@
-# rasta
+# RASTA
 
 > **PROTOTYPE – not an official service.**
 > This is a hackathon demo. All payments, people, and government services
