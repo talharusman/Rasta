@@ -211,6 +211,8 @@ def list_cases(
             select(Citizen.id).where(Citizen.user_id == user.id, Citizen.tenant_id == user.tenant_id)
         ))
     elif user.role == 'helper':
+        if citizen_id:
+            citizen_access(session, user, citizen_id, 'case:read')
         query = query.where(Case.citizen_id.in_(
             select(Consent.citizen_id).where(
                 Consent.tenant_id == user.tenant_id,
@@ -319,6 +321,8 @@ def review(identifier: uuid.UUID, body: Review, request: Request, user: Actor, s
     roles(user, 'officer', 'admin')
     case = case_access(session, user, identifier, 'case:write', True)
     verify_revision(case, body.expected_revision)
+    if case.status in ('approved', 'rejected', 'closed'):
+        fail(409, 'VALIDATION_ERROR', f'Case is already {case.status}')
     if case.status not in ('cleared', 'human_review'):
         fail(409, 'INVALID_TRANSITION')
     if user.role == 'admin' and not body.override_reason:
@@ -602,14 +606,51 @@ def audit_logs(
 @router.get(P + '/cases/{identifier}/decision-trace', tags=['audit'])
 def trace(identifier: uuid.UUID, user: Actor, session: DB, decision_id: uuid.UUID | None = None):
     roles(user, 'admin', 'auditor', 'officer')
-    case_access(session, user, identifier)
+    case = case_access(session, user, identifier)
     query = select(Decision).where(Decision.case_id == identifier, Decision.tenant_id == user.tenant_id)
     if decision_id:
         query = query.where(Decision.id == decision_id)
-    dec = session.scalar(query.order_by(Decision.created_at.desc()))
-    if not dec:
+    decisions = list(session.scalars(query.order_by(Decision.created_at.desc())))
+    if not decisions:
         fail(404, 'NOT_FOUND', 'No decision available')
-    return dump(dec)
+    latest_decision = decisions[0]
+
+    dec_list = []
+    for d in decisions:
+        d_dict = dump(d)
+        rule = session.get(Rule, d.rule_version_id)
+        if rule:
+            d_dict['rule_version'] = rule.version
+            d_dict['rule_name'] = rule.rule_name
+        dec_list.append(d_dict)
+
+    history_list = [
+        dump(h) for h in session.scalars(
+            select(History).where(History.case_id == identifier).order_by(History.created_at.asc())
+        )
+    ]
+
+    audit_list = [
+        dump(a) for a in session.scalars(
+            select(Audit).where(
+                Audit.tenant_id == user.tenant_id,
+                Audit.resource.contains(str(identifier))
+            ).order_by(Audit.created_at.asc())
+        )
+    ]
+
+    res = dump(latest_decision)
+    rule = session.get(Rule, latest_decision.rule_version_id)
+    if rule:
+        res['rule_version'] = rule.version
+        res['rule_name'] = rule.rule_name
+    res['case_id'] = identifier
+    res['case_status'] = case.status
+    res['final_outcome'] = case.final_outcome
+    res['decisions'] = dec_list
+    res['history'] = history_list
+    res['audit_logs'] = audit_list
+    return res
 
 
 @router.post(P + '/scam-checks', status_code=201, tags=['scam'])
