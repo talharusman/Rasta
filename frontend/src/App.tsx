@@ -12,8 +12,11 @@ import {
   useParams,
   useSearchParams,
 } from "react-router-dom";
+import { ReadAloudButton, VoiceInputButton } from "./voice";
 import {
   type DemoAccount,
+  ApiError,
+  DEMO_PASSWORD,
   apiHealth,
   demoAccounts,
   downloadBackendEvidence,
@@ -253,15 +256,15 @@ const navGroups = [
 function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
-  const [email, setEmail] = useState("officer@demo.rasta.pk");
-  const [password, setPassword] = useState("rasta-demo");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState(DEMO_PASSWORD);
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   const selectDemo = (account: DemoAccount) => {
     setEmail(account.email);
-    setPassword(account.password);
+    setPassword(DEMO_PASSWORD);
     setError("");
   };
 
@@ -395,8 +398,8 @@ function LoginPage() {
           </div>
 
           <p className="login-foot">
-            Prototype demonstration environment. Backend integration connected
-            with local synthetic fallback adapter for unavailable endpoints.
+            PROTOTYPE - not an official service. All people, IDs, payments and
+            messages are synthetic. NADRA, Raast and SMS are simulated.
           </p>
         </div>
       </section>
@@ -419,11 +422,27 @@ function RoleGate({
 }
 
 // --- Sidebar ---
+function useOnline(): boolean {
+  const [online, setOnline] = useState(() => navigator.onLine);
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const down = () => setOnline(false);
+    window.addEventListener("online", up);
+    window.addEventListener("offline", down);
+    return () => {
+      window.removeEventListener("online", up);
+      window.removeEventListener("offline", down);
+    };
+  }, []);
+  return online;
+}
+
 function Sidebar() {
   const { pathname } = useLocation();
   const { user, logout, switchRole } = useAuth();
-  const { cases } = useData();
+  const { cases, settings, updateSetting } = useData();
   const [profileOpen, setProfileOpen] = useState(false);
+  const online = useOnline();
 
   const reviewCount = useMemo(
     () => cases.filter((c) => c.status === "Needs review").length,
@@ -433,9 +452,9 @@ function Sidebar() {
   const permitted = (to: string) => {
     if (!user) return false;
     if (user.role === "OFFICER")
-      return ["/", "/cases", "/decisions", "/review", "/citizens", "/consent", "/audit", "/analytics"].includes(to);
+      return ["/", "/cases", "/decisions", "/review", "/consent", "/audit", "/analytics"].includes(to);
     if (user.role === "ADMIN")
-      return ["/", "/cases", "/decisions", "/citizens", "/consent", "/audit", "/rules", "/analytics", "/settings"].includes(to);
+      return ["/", "/cases", "/decisions", "/consent", "/audit", "/rules", "/analytics", "/settings"].includes(to);
     if (user.role === "AUDITOR")
       return ["/", "/cases", "/decisions", "/consent", "/audit", "/analytics"].includes(to);
     if (user.role === "HELPER")
@@ -506,10 +525,27 @@ function Sidebar() {
       </nav>
 
       <div className="sidebar-foot">
-        <div className="offline">
+        <div className="offline" role="status" aria-live="polite">
           <Icon name="cloud" size={15} />
-          <span>Local changes persisted</span>
+          <span>
+            {user?.source === "demo"
+              ? "OFFLINE DEMO - simulated data, not the real server"
+              : online ? "Online - changes save to the server" : "Offline - your draft is kept on this device"}
+          </span>
         </div>
+        <button
+          type="button"
+          aria-pressed={settings.lowBandwidth}
+          onClick={() => updateSetting("lowBandwidth", !settings.lowBandwidth)}
+          title="Turn off animations and graphics for slow connections"
+          style={{
+            margin: "8px 0 8px 11px", padding: "6px 10px", fontSize: 11, cursor: "pointer",
+            borderRadius: 6, border: "1px solid rgba(255,255,255,.25)",
+            background: settings.lowBandwidth ? "#c58a42" : "transparent", color: "#fff",
+          }}
+        >
+          {settings.lowBandwidth ? "Low-data mode: ON" : "Low-data mode: OFF"}
+        </button>
 
         <div style={{ position: "relative" }}>
           <button
@@ -533,8 +569,10 @@ function Sidebar() {
                 <button
                   key={acc.role}
                   onClick={() => {
-                    switchRole(acc.role);
                     setProfileOpen(false);
+                    switchRole(acc.role).catch((error) => {
+                      window.alert(error instanceof Error ? error.message : "Could not switch role.");
+                    });
                   }}
                 >
                   <span>{acc.label.split(" ")[0]}</span>
@@ -1327,10 +1365,10 @@ function Overview() {
           direction="flat"
         />
         <Metric
-          label="Average review time"
-          value="14m"
-          comparison="3m faster this week"
-          direction="up"
+          label="Awaiting officer"
+          value={String(reviewNeededCases.length)}
+          comparison="Low confidence or conflicting signals"
+          direction="flat"
         />
       </section>
 
@@ -1583,7 +1621,9 @@ function AdminHome() {
               <button
                 type="button"
                 className="outline-button"
-                onClick={() => switchRole(acc.role)}
+                onClick={() => switchRole(acc.role).catch((error) => {
+                  window.alert(error instanceof Error ? error.message : "Could not switch role.");
+                })}
               >
                 Switch to this Role →
               </button>
@@ -1619,10 +1659,10 @@ function AuditorHome() {
 
       <section className="metrics">
         <Metric
-          label="Immutable events"
+          label="Audit events"
           value={String(auditEvents.length)}
-          comparison="Protected with simulated hashes"
-          direction="up"
+          comparison="Most recent entries loaded"
+          direction="flat"
         />
         <Metric
           label="Active consents"
@@ -1637,9 +1677,9 @@ function AuditorHome() {
           direction="flat"
         />
         <Metric
-          label="Audit integrity"
-          value="100%"
-          comparison="Cryptographic continuity intact"
+          label="Denied attempts"
+          value={String(auditEvents.filter((e) => e.title === "access_denied").length)}
+          comparison="Blocked server-side and logged"
           direction="flat"
         />
       </section>
@@ -2272,6 +2312,10 @@ function CaseDetail() {
                 ? <span lang="ur" dir="rtl">{targetCase.aiReasonUr}</span>
                 : targetCase.aiReason}
             </h3>
+            <ReadAloudButton
+              lang={currentLang === "ur" && targetCase.aiReasonUr ? "ur" : "en"}
+              text={currentLang === "ur" && targetCase.aiReasonUr ? targetCase.aiReasonUr : targetCase.aiReason}
+            />
             <p>
               Automated routing suggestions do not disburse public funds without
               authorized officer review.
@@ -2568,11 +2612,51 @@ function ClaimForm() {
   const [consent, setConsent] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [draftRestored, setDraftRestored] = useState(false);
   const [result, setResult] = useState<{
     caseId: string;
     backendAi: boolean;
     backendNadra: boolean;
   } | null>(null);
+
+  // Saved progress: the form (and its idempotency key) survives reloads and
+  // dropped connections. Keyed per user AND per active citizen so families on a
+  // shared helper phone never see each other's drafts. Files must be re-attached.
+  const draftKey = `rasta.claimDraft.${user?.id ?? "anon"}.${isHelper ? helperActiveCitizen : "self"}`;
+  const draftLoaded = useRef<string>();
+  useEffect(() => {
+    if (draftLoaded.current === draftKey) return;
+    draftLoaded.current = draftKey;
+    try {
+      const saved = JSON.parse(localStorage.getItem(draftKey) ?? "null");
+      if (!saved) return;
+      setStep(saved.step ?? 1);
+      setPurpose(saved.purpose ?? "Relief assistance");
+      setPersonName(saved.personName ?? "");
+      setCnic(saved.cnic ?? "");
+      setPhone(saved.phone ?? "");
+      setIncome(saved.income ?? "");
+      setMembers(saved.members ?? "");
+      setAddress(saved.address ?? "");
+      setHouseholdDesc(saved.householdDesc ?? "");
+      setPaymentAccount(saved.paymentAccount ?? "");
+      if (saved.idempotency) idempotency.current = saved.idempotency;
+      setDraftRestored(true);
+    } catch {
+      // A corrupt draft is ignored.
+    }
+  }, [draftKey]);
+  useEffect(() => {
+    if (result || draftLoaded.current !== draftKey) return;
+    try {
+      localStorage.setItem(draftKey, JSON.stringify({
+        step, purpose, personName, cnic, phone, income, members, address, householdDesc,
+        paymentAccount, idempotency: idempotency.current,
+      }));
+    } catch {
+      // Storage full or disabled: the form still works, just without saved progress.
+    }
+  }, [draftKey, result, step, purpose, personName, cnic, phone, income, members, address, householdDesc, paymentAccount]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2588,6 +2672,14 @@ function ClaimForm() {
       const draft = JSON.stringify([user?.id, helperActiveCitizen, personName, cnic, phone, income, members, paymentAccount]);
       if (idempotency.current?.draft !== draft) {
         idempotency.current = { draft, key: crypto.randomUUID() };
+      }
+      // Persist the key before sending, so a retry after a dropped connection
+      // (even after a reload) reuses it and cannot create a duplicate claim.
+      try {
+        const saved = JSON.parse(localStorage.getItem(draftKey) ?? "{}");
+        localStorage.setItem(draftKey, JSON.stringify({ ...saved, idempotency: idempotency.current }));
+      } catch {
+        // ignore storage errors
       }
       const res = await createCase({
         person: personName,
@@ -2607,8 +2699,13 @@ function ClaimForm() {
         submittedByRole: user?.role || "CITIZEN",
       });
       setResult(res);
+      try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
     } catch (problem) {
-      setError(problem instanceof Error ? problem.message : "Could not complete submission.");
+      if (problem instanceof ApiError && problem.status === 0) {
+        setError("No connection right now. Your answers are saved on this device. Press Submit again when you are back online - it will not create a duplicate claim.");
+      } else {
+        setError(problem instanceof Error ? problem.message : "Could not complete submission.");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -2646,11 +2743,26 @@ function ClaimForm() {
                 alignItems: "center",
                 fontSize: 11,
                 color: "#72533f",
+                flexWrap: "wrap",
               }}
             >
               <Icon name="mic" size={16} />
-              <span>Voice input assistance active. Speak in Urdu or English.</span>
+              <span>
+                Tap 🎤 next to a question to answer by voice ({currentLang === "ur" ? "Urdu" : "English"}).
+                What we heard is shown so you can check it.
+              </span>
+              <ReadAloudButton
+                lang={currentLang}
+                text={currentLang === "ur"
+                  ? "اپنی ماہانہ آمدنی اور گھر کے افراد کی تعداد بتائیں۔ پھر اپنا نام اور شناختی نمبر بتائیں۔ آخر میں رضامندی دے کر درخواست جمع کرائیں۔"
+                  : "Tell us your monthly household income and how many people live in your home. Then give your name and ID number. Finally, give consent and submit your claim."}
+              />
             </div>
+          )}
+          {draftRestored && !result && (
+            <p style={{ marginTop: 12, fontSize: 12, color: "#72533f" }} role="status">
+              Your saved answers were restored. Re-attach any documents before submitting.
+            </p>
           )}
         </div>
 
@@ -2721,6 +2833,9 @@ function ClaimForm() {
                       required
                     />
                   </label>
+                  {settings.voiceAssistance && (
+                    <VoiceInputButton lang={currentLang} numeric label="monthly income" onText={setIncome} />
+                  )}
                   <label>
                     Number of Household Dependents
                     <input
@@ -2731,6 +2846,9 @@ function ClaimForm() {
                       required
                     />
                   </label>
+                  {settings.voiceAssistance && (
+                    <VoiceInputButton lang={currentLang} numeric label="household members" onText={setMembers} />
+                  )}
                   <button
                     type="button"
                     className="primary-button"
@@ -2752,6 +2870,9 @@ function ClaimForm() {
                       required
                     />
                   </label>
+                  {settings.voiceAssistance && (
+                    <VoiceInputButton lang={currentLang} label="full name" onText={setPersonName} />
+                  )}
                   <label>
                     {isLive ? "Synthetic identity ID" : "National Identity Card (CNIC)"}
                     <input
@@ -2880,8 +3001,13 @@ function ReviewQueue() {
     .filter((c) => c.status === "Needs review" || c.status === "Checks passed")
     .filter((c) => priorityFilter === "All" || c.priority === priorityFilter)
     .sort((a, b) => {
-      if (sort === "Priority") return a.priority.localeCompare(b.priority);
-      return b.id.localeCompare(a.id);
+      // Unscored cases count as the least certain, so they surface first.
+      const certainty = (c: typeof a) => (c.score === "—" ? -1 : c.aiConfidence);
+      if (sort === "Priority") {
+        return a.priority.localeCompare(b.priority) || certainty(a) - certainty(b);
+      }
+      if (sort === "Least confident") return certainty(a) - certainty(b);
+      return (b.submittedAt ?? "").localeCompare(a.submittedAt ?? "");
     });
 
   const activeCase =
@@ -2911,7 +3037,9 @@ function ReviewQueue() {
           <button
             type="button"
             className="filter-button"
-            onClick={() => setSort(sort === "Priority" ? "Newest" : "Priority")}
+            onClick={() => setSort(
+              sort === "Priority" ? "Least confident" : sort === "Least confident" ? "Newest" : "Priority"
+            )}
           >
             Sort: {sort} <Icon name="chevron" size={14} />
           </button>
@@ -3026,17 +3154,46 @@ function ReviewQueue() {
 // ==========================================
 // DECISION CENTER
 // ==========================================
+const CLEARED_ROUTES = ["cleared", "AUTO_APPROVE"];
+const HUMAN_ROUTES = ["human_review", "HUMAN"];
+const PROOF_ROUTES = ["needs_proof", "ASK_MORE"];
+
+function pct(part: number, whole: number): number {
+  return whole ? Math.round((part / whole) * 100) : 0;
+}
+
 function DecisionCenter() {
-  const { cases } = useData();
+  const { cases, activeRule } = useData();
   const [briefExported, setBriefExported] = useState(false);
+
+  // Every figure on this page is computed from the cases actually loaded.
+  const decided = cases.filter((c) => c.aiRoute && c.aiRoute !== "Pending");
+  const clearedCount = decided.filter((c) => CLEARED_ROUTES.includes(c.aiRoute)).length;
+  const humanCount = decided.filter((c) => HUMAN_ROUTES.includes(c.aiRoute)).length;
+  const proofCount = decided.filter((c) => PROOF_ROUTES.includes(c.aiRoute)).length;
+  const withConfidence = decided.filter((c) => c.score !== "—");
+  const avgConfidence = withConfidence.length
+    ? Math.round((withConfidence.reduce((sum, c) => sum + c.aiConfidence, 0) / withConfidence.length) * 100)
+    : null;
+  const latest = [...decided].sort((a, b) => (b.submittedAt ?? "").localeCompare(a.submittedAt ?? ""))[0];
+  const latestTone = latest
+    ? CLEARED_ROUTES.includes(latest.aiRoute) ? "success" : HUMAN_ROUTES.includes(latest.aiRoute) ? "warning" : "neutral"
+    : "neutral";
+  const routeLabel = (route: string) =>
+    CLEARED_ROUTES.includes(route) ? "Automated checks passed"
+      : HUMAN_ROUTES.includes(route) ? "Sent to human officer"
+      : PROOF_ROUTES.includes(route) ? "More proof requested" : route;
+  const clearedPct = pct(clearedCount, decided.length);
 
   const handleExportBrief = () => {
     const summary = {
       timestamp: new Date().toISOString(),
-      activeCaseload: cases.length,
-      averageConfidence: "82%",
-      rulesVersion: "v3.1",
-      humanEscalationRate: "18%",
+      casesLoaded: cases.length,
+      decisionsEvaluated: decided.length,
+      routes: { cleared: clearedCount, needs_proof: proofCount, human_review: humanCount },
+      averageConfidence: avgConfidence === null ? null : `${avgConfidence}%`,
+      humanEscalationRate: `${pct(humanCount, decided.length)}%`,
+      rulesVersion: activeRule.version,
     };
     const blob = new Blob([JSON.stringify(summary, null, 2)], {
       type: "application/json",
@@ -3072,41 +3229,48 @@ function DecisionCenter() {
       <section className="decision-kpis">
         <Metric
           label="Decisions evaluated"
-          value={String(cases.length)}
-          comparison="Across relief assessment types"
-          direction="up"
+          value={String(decided.length)}
+          comparison={`${cases.length} cases loaded`}
+          direction="flat"
         />
         <Metric
           label="Human escalation rate"
-          value="18%"
-          comparison="When signals conflict"
+          value={`${pct(humanCount, decided.length)}%`}
+          comparison={`${humanCount} of ${decided.length} sent to an officer`}
           direction="flat"
         />
         <Metric
           label="Active policy rule"
-          value="v3.1"
-          comparison="Sindh Social Relief Baseline"
+          value={activeRule.version}
+          comparison={activeRule.name}
           direction="flat"
         />
       </section>
 
       <section className="decision-grid">
         <div className="panel model-panel">
-          <PanelHeader title="Assessment Quality Breakdown" />
+          <PanelHeader title="Routing Breakdown" />
           <div className="donut-wrap">
-            <div className="donut">
+            <div
+              className="donut"
+              style={{ background: `conic-gradient(#689f73 0 ${clearedPct}%, #e5ded4 ${clearedPct}%)` }}
+            >
               <span>
-                82<small>%</small>
+                {clearedPct}<small>%</small>
               </span>
             </div>
             <div>
-              <strong>High Confidence Routing</strong>
-              <p>Clear evidence supports automated recommendations.</p>
+              <strong>Passed automated checks</strong>
+              <p>
+                {avgConfidence === null
+                  ? "No confidence scores recorded yet."
+                  : `Average route confidence ${avgConfidence}%. Passing checks never releases money without an officer.`}
+              </p>
               <span className="model-key">
-                <i /> 82% Auto-eligible
+                <i /> {clearedCount} passed checks
               </span>
               <span className="model-key model-key--review">
-                <i /> 18% Escalated to Review
+                <i /> {humanCount} human review · {proofCount} need proof
               </span>
             </div>
           </div>
@@ -3114,37 +3278,39 @@ function DecisionCenter() {
 
         <div className="panel explain-panel">
           <PanelHeader title="Latest Decision Trace" />
-          <div className="explain-case">
-            <span className="initials initials--large">MA</span>
-            <span>
-              <strong>REL-20480 · Muhammad Afzal</strong>
-              <small>Relief assistance · 94% confidence</small>
-            </span>
-            <Badge tone="success">Clear to proceed</Badge>
-          </div>
-          <div className="reason-list reason-list--compact">
-            <div className="reason">
-              <span className="reason-icon reason-icon--good">
-                <Icon name="check" size={14} />
-              </span>
-              <span>Verified identity matched source NADRA registry</span>
-            </div>
-            <div className="reason">
-              <span className="reason-icon reason-icon--good">
-                <Icon name="check" size={14} />
-              </span>
-              <span>Household income below Rs 45,000 threshold</span>
-            </div>
-            <div className="reason">
-              <span className="reason-icon reason-icon--good">
-                <Icon name="check" size={14} />
-              </span>
-              <span>No duplicate or fraud indicators detected</span>
-            </div>
-          </div>
-          <Link to="/cases/REL-20480" className="explain-link">
-            Inspect full case trace <Icon name="arrow" size={15} />
-          </Link>
+          {latest ? (
+            <>
+              <div className="explain-case">
+                <span className="initials initials--large">
+                  {latest.person.split(" ").map((x) => x[0]).join("").slice(0, 2)}
+                </span>
+                <span>
+                  <strong>{latest.person}</strong>
+                  <small>{latest.type} · {latest.score} confidence</small>
+                </span>
+                <Badge tone={latestTone}>{routeLabel(latest.aiRoute)}</Badge>
+              </div>
+              <div className="reason-list reason-list--compact">
+                <div className="reason">
+                  <span className={`reason-icon ${latest.nadraVerified ? "reason-icon--good" : ""}`}>
+                    <Icon name={latest.nadraVerified ? "check" : "alert"} size={14} />
+                  </span>
+                  <span>{latest.nadraVerified ? "Identity verified with mock registry" : "Identity not verified"}</span>
+                </div>
+                <div className="reason">
+                  <span className="reason-icon">
+                    <Icon name="spark" size={14} />
+                  </span>
+                  <span>{latest.aiReason}</span>
+                </div>
+              </div>
+              <Link to={`/cases/${latest.id}`} className="explain-link">
+                Inspect full case trace <Icon name="arrow" size={15} />
+              </Link>
+            </>
+          ) : (
+            <p style={{ margin: 0 }}>No automated decisions recorded yet.</p>
+          )}
         </div>
       </section>
     </>
@@ -3181,6 +3347,14 @@ function Citizens() {
           />
         </label>
       </section>
+
+      {filtered.length === 0 && (
+        <div className="panel empty-results">
+          {authorizedCitizens.length === 0
+            ? "No citizens have shared access with you yet. A citizen can grant you access from their Consent page."
+            : "No citizens match this filter."}
+        </div>
+      )}
 
       <div className="citizen-cards">
         {filtered.map((c) => (
@@ -4008,7 +4182,9 @@ export default function App() {
           <Route
             path="/citizens"
             element={
-              <RoleGate roles={["HELPER", "OFFICER", "ADMIN"]}>
+              // The API lists citizens only to helpers they have shared access
+              // with; officers and admins see citizens through cases.
+              <RoleGate roles={["HELPER"]}>
                 <Citizens />
               </RoleGate>
             }

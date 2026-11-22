@@ -4,20 +4,32 @@ import type { AuthResult, AuthUser, Role } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
+// Offline demo mode simulates cases in the browser. It is OFF unless the build
+// sets VITE_ALLOW_DEMO_MODE=true, so a deployed app never silently shows
+// simulated results when the real backend is down.
+export const DEMO_MODE_ALLOWED = import.meta.env.VITE_ALLOW_DEMO_MODE === "true";
+
+const SESSION_KEY = "rasta.session.v2";
+export const SESSION_EXPIRED_EVENT = "rasta:session-expired";
+
 export type { Role, AuthUser, AuthResult };
 
 export interface DemoAccount extends AuthUser {
-  password: string;
   label: string;
   description: string;
 }
+
+// Shared password for the synthetic judge accounts. It is NOT stored in the
+// source: set VITE_DEMO_PASSWORD in the build only if you want one-click role
+// switching for judges (anything in a VITE_ variable is visible in the bundle).
+// Left empty, the account buttons only fill in the email.
+export const DEMO_PASSWORD: string = import.meta.env.VITE_DEMO_PASSWORD ?? "";
 
 export const demoAccounts: DemoAccount[] = [
   {
     id: "1a4c8fd6-5f1d-4d64-b143-e3ddbeeb7033",
     name: "Synthetic Citizen (Ayesha Bibi)",
     email: "citizen@rasta.com",
-    password: "rasta-demo",
     role: "CITIZEN",
     label: "Citizen (Synthetic Citizen)",
     description: "Vulnerable applicant with pre-linked citizen profile",
@@ -30,7 +42,6 @@ export const demoAccounts: DemoAccount[] = [
     id: "7ad5b1c1-61ca-46bd-b2f0-1bb9dca2c17d",
     name: "Synthetic Helper (Sana Iqbal)",
     email: "helper@rasta.com",
-    password: "rasta-demo",
     role: "HELPER",
     label: "Community Helper (Synthetic Helper)",
     description: "Field worker assisting citizens with consent & filings",
@@ -42,7 +53,6 @@ export const demoAccounts: DemoAccount[] = [
     id: "5b51743a-b609-42bb-88d3-55676a8dd357",
     name: "Synthetic Officer (Fatima Khan)",
     email: "officer@rasta.com",
-    password: "rasta-demo",
     role: "OFFICER",
     label: "Department Officer (Synthetic Officer)",
     description: "Adjudicates claims, verifies identity, dispatches funds",
@@ -53,7 +63,6 @@ export const demoAccounts: DemoAccount[] = [
     id: "e5da9580-182c-4163-b2fa-de6532ca4e54",
     name: "Synthetic Admin (Mariam Shah)",
     email: "admin@rasta.com",
-    password: "rasta-demo",
     role: "ADMIN",
     label: "Administrator (Synthetic Admin)",
     description: "Manages system policy, rules v1, service health",
@@ -64,7 +73,6 @@ export const demoAccounts: DemoAccount[] = [
     id: "6e51e997-8887-4da2-b1be-a28e98b964fe",
     name: "Synthetic Auditor (Omar Siddiqui)",
     email: "auditor@rasta.com",
-    password: "rasta-demo",
     role: "AUDITOR",
     label: "Auditor (Synthetic Auditor)",
     description: "Read-only oversight of decision traces & immutable ledger",
@@ -80,24 +88,56 @@ export class ApiError extends Error {
   }
 }
 
-export function getStoredToken(): string | null {
+function readSession(): (AuthResult & { refreshToken?: string }) | null {
   try {
-    const raw = localStorage.getItem("rasta.session.v2");
-    if (!raw) return null;
-    const session = JSON.parse(raw);
-    return session?.accessToken || null;
+    const raw = localStorage.getItem(SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+export function getStoredToken(): string | null {
+  return readSession()?.accessToken || null;
+}
+
+// One shared refresh at a time, so parallel 401s don't race each other.
+let refreshing: Promise<boolean> | null = null;
+
+function refreshSession(): Promise<boolean> {
+  refreshing ??= (async () => {
+    const session = readSession();
+    if (!session?.refreshToken) return false;
+    try {
+      const response = await fetch(`${API_URL}/api/v1/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: session.refreshToken }),
+      });
+      if (!response.ok) return false;
+      const data = await response.json();
+      if (!data?.access_token) return false;
+      localStorage.setItem(SESSION_KEY, JSON.stringify({
+        ...session,
+        accessToken: data.access_token,
+        refreshToken: data.refresh_token ?? session.refreshToken,
+      }));
+      return true;
+    } catch {
+      return false;
+    }
+  })().finally(() => { refreshing = null; });
+  return refreshing;
+}
+
+async function request<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
   const token = getStoredToken();
   const headers = new Headers(init.headers || {});
   if (!headers.has("Content-Type") && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
-  if (token && !headers.has("Authorization") && !token.startsWith("demo.")) {
+  const explicitAuth = headers.has("Authorization");
+  if (token && !explicitAuth && !token.startsWith("demo.")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
 
@@ -109,6 +149,14 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     });
   } catch (err) {
     throw new ApiError(0, `RASTA API endpoint (${path}) unreachable.`);
+  }
+
+  // Expired access token: refresh once and retry. If refresh fails, end the
+  // session so the UI returns to sign-in instead of failing silently.
+  if (response.status === 401 && !retried && !explicitAuth && token && !token.startsWith("demo.")
+      && !path.startsWith("/api/v1/auth/")) {
+    if (await refreshSession()) return request<T>(path, init, true);
+    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
   }
 
   const contentType = response.headers.get("content-type") || "";
@@ -126,10 +174,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 function demoLogin(email: string, password: string): AuthResult {
   const account = demoAccounts.find((item) => item.email.toLowerCase() === email.trim().toLowerCase());
-  if (!account || account.password !== password) {
+  if (!account || !DEMO_PASSWORD || password !== DEMO_PASSWORD) {
     throw new ApiError(401, "Invalid credentials. Use a judge demo account or check email/password.");
   }
-  const { password: _, label: __, description: ___, ...user } = account;
+  const { label: _, description: __, ...user } = account;
   return {
     accessToken: `demo.${user.id}.${Date.now()}`,
     user: { ...user, source: "demo" },
@@ -149,6 +197,7 @@ export async function login(email: string, password: string): Promise<AuthResult
     const currentUser = await getCurrentUser(result.access_token);
     return {
       accessToken: result.access_token,
+      refreshToken: result.refresh_token,
       user: {
         ...currentUser,
         email: email.trim(),
@@ -156,9 +205,13 @@ export async function login(email: string, password: string): Promise<AuthResult
       },
     };
   } catch (error) {
-    // If backend unreachable or login fails, fall back to matching demo account
-    if (error instanceof ApiError && (error.status === 0 || error.status === 404 || error.status === 405 || error.status === 503)) {
+    // Only when explicitly enabled, and only when the backend cannot be
+    // reached at all, fall back to the clearly-labelled offline demo.
+    if (DEMO_MODE_ALLOWED && error instanceof ApiError && error.status === 0) {
       return demoLogin(email, password);
+    }
+    if (error instanceof ApiError && error.status === 0) {
+      throw new ApiError(0, "Cannot reach the RASTA server. Check your connection and try again.");
     }
     throw error;
   }
@@ -169,7 +222,7 @@ export async function getCurrentUser(token: string): Promise<AuthUser> {
     const parts = token.split(".");
     const account = demoAccounts.find((a) => a.id === parts[1]);
     if (account) {
-      const { password: _, label: __, description: ___, ...user } = account;
+      const { label: _, description: __, ...user } = account;
       return user;
     }
   }
@@ -392,21 +445,6 @@ export async function verifyNadra(cnic: string): Promise<NadraVerifyResponse> {
   });
 }
 
-export interface RaastPayResponse {
-  status: string;
-  transaction_id: string;
-  cnic: string;
-  amount: number;
-  note: string;
-}
-
-export async function disburseRaast(cnic: string, amount: number): Promise<RaastPayResponse> {
-  return request<RaastPayResponse>("/api/mock/raast/pay", {
-    method: "POST",
-    body: JSON.stringify({ cnic, amount }),
-  });
-}
-
 export interface SmsSendResponse {
   status: string;
   to: string;
@@ -446,7 +484,10 @@ export interface BackendCase {
   payment?: { status: "queued" | "pending" | "confirmed" | "failed"; amount: number | null; transaction_id: string | null } | null;
 }
 
-export type BackendReviewCase = Pick<BackendCase, "case_id" | "status" | "revision" | "assigned_officer_id" | "created_at">;
+export type BackendReviewCase = Pick<BackendCase, "case_id" | "status" | "revision" | "assigned_officer_id" | "created_at"> & {
+  confidence?: number | null;
+  route?: string | null;
+};
 
 export async function fetchBackendCitizens() {
   const result = await request<{ items: { id: string; name: string; mock_identity_id: string }[] }>("/api/v1/citizens");

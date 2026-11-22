@@ -12,7 +12,6 @@ import {
   type BackendCase,
   type BackendReviewCase,
   type EvidenceType,
-  disburseRaast,
   fetchBackendAuditLogs,
   fetchBackendCases,
   fetchBackendConsents,
@@ -782,7 +781,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       needs_proof: "More information", human_review: "Needs review",
       approved: "Verified", rejected: "Rejected", closed: "Closed",
     };
-    const confidence = row.decision?.confidence;
+    const confidence = row.decision?.confidence ?? row.confidence;
     const tone = row.status === "approved" ? "success" : row.status === "rejected" ? "danger"
       : row.status === "human_review" ? "warning" : "neutral";
     return {
@@ -909,8 +908,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       nadraNote = nadraResp.note;
       backendNadra = true;
     } catch {
-      nadraVerified = true;
-      nadraNote = "Local simulated NADRA match";
+      // A failed or unreachable identity check is never treated as verified.
+      nadraVerified = false;
+      nadraNote = "Identity service unavailable - routed to a human officer";
     }
 
     const nextId = `REL-${Math.floor(20482 + Math.random() * 500)}`;
@@ -926,10 +926,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       householdMembers: payload.householdMembers,
       address: payload.address,
       notes: payload.notes,
-      status: aiRoute === "AUTO_APPROVE" ? "Verified" : "Needs review",
+      status: aiRoute === "AUTO_APPROVE" && nadraVerified ? "Checks passed" : "Needs review",
       priority: payload.householdIncome < 30000 ? "P1" : "P2",
       score: `${Math.round(aiConfidence * 100)}%`,
-      tone: aiRoute === "AUTO_APPROVE" ? "success" : "warning",
+      tone: aiRoute === "AUTO_APPROVE" && nadraVerified ? "success" : "warning",
       date: "Just now",
       submittedAt: new Date().toISOString(),
       submittedBy: payload.submittedBy,
@@ -1051,16 +1051,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     const nowTime = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
     if (action === "approve") {
-      let raastTxn = "FAKE-TXN-DEMO";
+      // Offline demo only: a locally simulated transaction reference.
+      const raastTxn = `DEMO-TXN-${Math.floor(10000 + Math.random() * 90000)}`;
       let smsSent = false;
-
-      // Real Raast payment API call
-      try {
-        const payRes = await disburseRaast(targetCase.cnic, 25000);
-        raastTxn = payRes.transaction_id;
-      } catch {
-        raastTxn = `TXN-${Math.floor(10000 + Math.random() * 90000)}`;
-      }
 
       // Real SMS dispatch API call
       try {
