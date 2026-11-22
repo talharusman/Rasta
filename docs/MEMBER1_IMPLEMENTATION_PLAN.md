@@ -6,8 +6,7 @@ Primary source: all 12 pages of `AI_Hackathon_Detailed_Team_Execution_Plan.pdf`.
 
 - `backend/app/models.py`: users, citizens, cases, documents, consents, immutable-version policies, decisions, history, audits, durable jobs, notifications and scam checks.
 - `backend/app/platform.py`: lazy PostgreSQL sessions, Supabase asymmetric JWT verification, authoritative database roles, tenant/resource authorization, scoped consent, policy guards, audit helpers and AI client.
-- `backend/app/schemas.py`: strict Pydantic inputs and revision requirements.
-- `backend/app/main.py`: PDF public endpoints, refresh/citizen-directory/private-download extensions and worker integration endpoints.
+- Public API routes and input schemas now live in `backend/platform/routes.py` and `backend/platform/services.py`, mounted by the shared `backend/main.py`. The old standalone `main.py`/`schemas.py` copies were removed.
 - `backend/migrations`: initial manually authored Alembic schema with constraints, RLS and browser privilege revocation. Not executed.
 - `backend/app/bootstrap.py`: bind precreated Supabase users to fabricated profiles and initial policy.
 
