@@ -150,8 +150,9 @@ def citizens(user: Actor, session: DB):
 def create_case(body: CreateCase, request: Request, user: Actor, session: DB):
     citizen_access(session, user, body.citizen_id, 'case:write')
     claim = body.model_dump(mode='json')
-    if claim['data']['citizen_phone'] is None:
-        del claim['data']['citizen_phone']
+    for field in ('citizen_phone', 'dob'):
+        if claim['data'][field] is None:
+            del claim['data'][field]
     hashed = hashlib.sha256(json.dumps(claim, sort_keys=True).encode()).hexdigest()
     old = session.scalar(
         select(Case).where(
@@ -170,7 +171,7 @@ def create_case(body: CreateCase, request: Request, user: Actor, session: DB):
         created_by=user.id,
         helper_id=user.id if user.role == 'helper' else None,
         claim_type=body.claim_type,
-        data=body.data.model_dump(),
+        data=body.data.model_dump(mode="json"),
         idempotency_key=body.idempotency_key,
         request_hash=hashed
     )
@@ -266,7 +267,7 @@ def edit_case(identifier: uuid.UUID, body: EditCase, request: Request, user: Act
     verify_revision(case, body.expected_revision)
     if case.status not in ('draft', 'needs_proof'):
         fail(409, 'INVALID_TRANSITION', 'Case is not editable')
-    case.data = body.data.model_dump()
+    case.data = body.data.model_dump(mode="json")
     change(session, request, case, case.status, action='case_edited')
     return detail(session, case)
 
@@ -391,6 +392,31 @@ def history(identifier: uuid.UUID, user: Actor, session: DB):
 
 
 # --- Documents ---
+@router.post(P + '/documents/preview', tags=['documents'])
+def preview_document(
+    user: Actor, session: DB, file: UploadFile = File(), citizen_id: uuid.UUID = Form(),
+    consent: bool = Form(),
+):
+    from ai.services import ServiceError, extract_document
+
+    roles(user, 'citizen', 'helper')
+    if not consent:
+        fail(403, 'CONSENT_REQUIRED', 'Confirm permission to analyze this synthetic photo')
+    citizen = citizen_access(session, user, citizen_id, 'document:upload', lock=False)
+    if user.role == 'helper':
+        processing(session, citizen)
+    content = file.file.read(5 * 1024 * 1024 + 1)
+    if len(content) > 5 * 1024 * 1024:
+        fail(413, 'FILE_TOO_LARGE', 'Maximum upload is 5 MiB')
+    if not content.startswith((b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff')):
+        fail(415, 'UNSUPPORTED_MEDIA_TYPE', 'Preview requires a JPEG or PNG image')
+    try:
+        result = extract_document(doc_type='identity_proof', content=content)
+    except ServiceError as exc:
+        fail(exc.status, exc.code, exc.message, exc.retryable)
+    return {key: result[key] for key in ('quality_ok', 'quality_note', 'extracted_fields', 'suggested_action')}
+
+
 @router.post(P + '/cases/{identifier}/documents', status_code=201, tags=['documents'])
 def upload(
     identifier: uuid.UUID,

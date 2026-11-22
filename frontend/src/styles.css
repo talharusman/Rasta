@@ -86,3 +86,15 @@
 .admin-failure-card{margin-top:20px;padding:20px}
 .admin-prototype-warning{background:#fff8ed;border:1px solid #fcd34d;padding:10px 14px;border-radius:6px;margin-bottom:16px;color:#92400e;font-size:11px}
 
+
+.doc-scanner-container {
+  display: grid;
+  gap: 0.75rem;
+  margin-block: 0.75rem 1rem;
+  padding: 1rem;
+}
+
+.doc-scanner-container h4,
+.doc-scanner-container p {
+  margin: 0;
+}

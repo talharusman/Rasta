@@ -55,6 +55,7 @@ interface DataContextValue {
     person: string;
     cnic: string;
     phone: string;
+    dob?: string;
     type: string;
     householdIncome: number;
     householdMembers: number;
@@ -763,6 +764,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           id: row.id, timestamp: row.created_at, category: "CASE" as const,
           title: row.action, actor: row.actor_id ?? row.actor_type, actorRole: "ADMIN" as const,
           details: JSON.stringify(row.details), hash: row.id, source: "api" as const,
+          ruleVersion: row.details?.rule_version, modelVersion: row.details?.model_version,
         })) : [],
       };
       setLive(owned);
@@ -811,6 +813,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       aiReason: row.user_explanation ?? "Automated assessment pending.",
       aiReasonUr: row.user_explanation_ur ?? undefined,
       aiConfidence: confidence ?? 0, nadraVerified: row.decision?.identity_verified,
+      dob: row.data?.dob ?? undefined, citizenId: row.citizen_id,
       ruleVersion: row.decision?.rule_version, modelVersion: row.decision?.model_version,
       timeline: [], backendStatus: row.status, backendRevision: row.revision,
       requiredDocuments: row.required_documents, documents: row.documents, assignedOfficerId: row.assigned_officer_id,
@@ -858,6 +861,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     person: string;
     cnic: string;
     phone: string;
+    dob?: string;
     type: string;
     householdIncome: number;
     householdMembers: number;
@@ -893,6 +897,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           payment_account: payload.paymentAccount?.trim().toUpperCase() ?? "",
           monthly_income: payload.householdIncome, household_size: payload.householdMembers,
           citizen_phone: phone || undefined,
+          dob: payload.dob || undefined,
         },
       });
       if (created.status === "draft") await uploadAndSubmit(created, payload.evidence ?? {});
@@ -940,6 +945,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       id: nextId,
       person: payload.person,
       cnic: payload.cnic,
+      dob: payload.dob,
       phone: payload.phone,
       type: payload.type,
       householdIncome: payload.householdIncome,
@@ -1057,8 +1063,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           }));
           return {
             ...c,
-            status: "Processing" as const,
-            tone: "neutral" as const,
+            status: "Needs review" as const,
+            tone: "warning" as const,
             evidenceRequested: false,
             documents: [...(c.documents || []), ...newDocs],
             timeline: [
@@ -1130,8 +1136,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       try {
         const payRes = await disburseRaast(targetCase.cnic, 25000);
         raastTxn = payRes.transaction_id;
-      } catch {
-        raastTxn = `TXN-${Math.floor(10000 + Math.random() * 90000)}`;
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.status !== 0) {
+          return { success: false, note: error instanceof Error ? error.message : "Demo payment failed." };
+        }
       }
 
       // Real SMS dispatch API call

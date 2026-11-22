@@ -1,13 +1,10 @@
-// Local persistence for citizen claim drafts, idempotency keys, and offline save states.
-
 export interface ClaimDraftData {
-  userId?: string;
-  helperActiveCitizen?: string;
   purpose: string;
   income: string;
   members: string;
   personName: string;
   cnic: string;
+  dob: string;
   phone: string;
   address: string;
   householdDesc: string;
@@ -15,95 +12,52 @@ export interface ClaimDraftData {
   step: number;
 }
 
-const DRAFT_STORAGE_KEY = "rasta.claim.draft_v1";
-const IDEMPOTENCY_STORAGE_KEY = "rasta.claim.idempotency_v1";
+const draftKey = (scope: string) => `rasta.claim.draft_v2:${scope}`;
+const retryKey = (scope: string) => `rasta.claim.idempotency_v2:${scope}`;
 
-/**
- * Computes a stable, normalized fingerprint of the claim draft fields.
- * If any material field changes, the fingerprint changes.
- */
 export function computeDraftFingerprint(draft: ClaimDraftData): string {
-  const parts = [
-    draft.userId || "",
-    draft.helperActiveCitizen || "",
-    draft.purpose.trim(),
-    draft.income.trim(),
-    draft.members.trim(),
-    draft.personName.trim().toLowerCase(),
-    draft.cnic.trim().toUpperCase(),
-    draft.phone.trim(),
-    draft.address.trim().toLowerCase(),
-    draft.householdDesc.trim().toLowerCase(),
-    draft.paymentAccount.trim().toUpperCase(),
-  ];
-  return parts.join("::");
+  const { step, ...fields } = draft;
+  return JSON.stringify(fields);
 }
 
-/**
- * Retrieves the stored idempotency key for this draft fingerprint,
- * or generates and persists a new UUID if none exists or if the draft materially changed.
- */
-export function getOrGenerateIdempotencyKey(fingerprint: string): string {
+export function getOrGenerateIdempotencyKey(scope: string, fingerprint: string): string {
+  const key = retryKey(scope);
   try {
-    const raw = localStorage.getItem(IDEMPOTENCY_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as { fingerprint: string; key: string };
-      if (parsed.fingerprint === fingerprint && parsed.key) {
-        return parsed.key;
-      }
-    }
+    const stored = JSON.parse(localStorage.getItem(key) ?? "null");
+    if (stored?.fingerprint === fingerprint && typeof stored.key === "string") return stored.key;
   } catch {
-    // Ignore parse errors and generate fresh key
+    // A damaged draft does not prevent a new submission.
   }
-
-  const newKey = crypto.randomUUID();
+  const id = crypto.randomUUID();
   try {
-    localStorage.setItem(
-      IDEMPOTENCY_STORAGE_KEY,
-      JSON.stringify({ fingerprint, key: newKey, timestamp: Date.now() })
-    );
+    localStorage.setItem(key, JSON.stringify({ fingerprint, key: id }));
+  } catch {}
+  return id;
+}
+
+export function saveClaimDraft(scope: string, draft: ClaimDraftData): boolean {
+  try {
+    localStorage.setItem(draftKey(scope), JSON.stringify(draft));
+    return true;
   } catch {
-    // Local storage unavailable
+    return false;
   }
-  return newKey;
 }
 
-/**
- * Clears the persisted idempotency key after a confirmed successful submission.
- */
-export function clearIdempotencyKey(): void {
+export function loadClaimDraft(scope: string): Partial<ClaimDraftData> | null {
   try {
-    localStorage.removeItem(IDEMPOTENCY_STORAGE_KEY);
-  } catch {}
-}
-
-/**
- * Saves claim draft data to localStorage.
- */
-export function saveClaimDraft(draft: ClaimDraftData): void {
-  try {
-    localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
-  } catch {}
-}
-
-/**
- * Loads persisted claim draft data from localStorage, if any.
- */
-export function loadClaimDraft(): ClaimDraftData | null {
-  try {
-    const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw) as ClaimDraftData;
+    const data = JSON.parse(localStorage.getItem(draftKey(scope)) ?? "null");
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+    const fields = Object.fromEntries(Object.entries(data).filter(([, value]) => typeof value === "string"));
+    return { ...fields, step: [1, 2, 3].includes(data.step) ? data.step : 1 };
   } catch {
     return null;
   }
 }
 
-/**
- * Clears persisted claim draft upon successful submission.
- */
-export function clearClaimDraft(): void {
+export function clearClaimDraft(scope: string): void {
   try {
-    localStorage.removeItem(DRAFT_STORAGE_KEY);
+    localStorage.removeItem(draftKey(scope));
+    localStorage.removeItem(retryKey(scope));
   } catch {}
 }
