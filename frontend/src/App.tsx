@@ -52,6 +52,8 @@ import {
   clearClaimDraft,
 } from "./claimStorage";
 import "./styles.css";
+import "./loginRepair.css";
+import LandingPage from "./LandingPage";
 
 // --- Icons ---
 type IconName =
@@ -223,7 +225,6 @@ function JourneyGraphic() {
       </svg>
       <span className="journey-label journey-label--start">Citizen</span>
       <span className="journey-label journey-label--verify">Verified</span>
-      <span className="journey-label journey-label--review">Safeguarded</span>
     </div>
   );
 }
@@ -318,7 +319,7 @@ function LoginPage() {
           <span>RASTA</span>
           <small>PUBLIC RAILS</small>
         </Link>
-        <div>
+        <div className="login-journey__copy">
           <p className="label">DIGITAL PUBLIC INFRASTRUCTURE</p>
           <h1>
             A safer way<br />
@@ -329,7 +330,7 @@ function LoginPage() {
             clear path.
           </p>
         </div>
-        <JourneyGraphic />
+        <div className="login-journey__art"><JourneyGraphic /></div>
       </section>
 
       <section className="login-panel">
@@ -1026,8 +1027,11 @@ function CitizenHome() {
       </section>
 
       {/* Scam Message Checking Tool */}
-      <section className="panel scam-tool" style={{ marginTop: 20 }}>
-        <PanelHeader title="Check a Suspicious Message (Scam Shield)" />
+      <section className="panel scam-tool" style={{ marginTop: 20 }} aria-labelledby="scam-shield-title">
+        <div className="scam-tool__head">
+          <span className="scam-tool__icon"><Icon name="shield" size={22} /></span>
+          <div><span className="scam-tool__eyebrow">AI-ASSISTED SAFETY CHECK</span><h2 id="scam-shield-title">Check a suspicious message</h2></div>
+        </div>
         <p>
           Paste any SMS, WhatsApp, or phone message offering aid or lottery
           money. RASTA will analyze it using our AI evaluation service to
@@ -1035,8 +1039,10 @@ function CitizenHome() {
         </p>
         <div style={{ padding: "0 20px" }}>
           <textarea
+            id="scam-message"
+            aria-label="Message to check for scam risk"
             placeholder="e.g. 'Mubarak ho! Apko 8171 program se 50,000 manzoor hogaye hain. Registration fee 2,500 Rs is number par bhaijein...'"
-            rows={3}
+            rows={7}
             value={scamInput}
             onChange={(e) => setScamInput(e.target.value)}
           />
@@ -4666,8 +4672,9 @@ export default function App() {
   if (!user) {
     return (
       <Routes>
+        <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<LoginPage />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     );
   }
