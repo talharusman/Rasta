@@ -235,9 +235,18 @@ def list_cases(
 @router.get(P + '/cases/review-queue', tags=['cases'])
 def review_queue(user: Actor, session: DB, limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)):
     roles(user, 'officer', 'admin')
-    query = select(Case).where(Case.tenant_id == user.tenant_id, Case.status.in_(['cleared', 'human_review']))
+    # Sort by priority, then least-confident first (uncertain cases need a human
+    # soonest; a missing confidence counts as the most uncertain), then oldest.
+    confidence = Decision.payload['confidence'].as_float()
+    query = (
+        select(Case, Decision)
+        .outerjoin(Decision, (Decision.case_id == Case.id)
+                   & (Decision.processing_generation == Case.processing_generation))
+        .where(Case.tenant_id == user.tenant_id, Case.status.in_(['cleared', 'human_review']))
+    )
     if user.role == 'officer':
         query = query.where(or_(Case.assigned_officer_id == user.id, Case.assigned_officer_id.is_(None)))
+    query = query.order_by(Case.priority.desc(), confidence.asc().nulls_first(), Case.created_at, Case.id)
     return {
         'items': [
             {
@@ -247,8 +256,10 @@ def review_queue(user: Actor, session: DB, limit: int = Query(20, ge=1, le=100),
                 'revision': c.revision,
                 'assigned_officer_id': c.assigned_officer_id,
                 'created_at': c.created_at,
+                'confidence': d.payload.get('confidence') if d else None,
+                'route': d.payload.get('route') if d else None,
             }
-            for c in session.scalars(query.order_by(Case.priority.desc(), Case.created_at, Case.id).limit(limit).offset(offset))
+            for c, d in session.execute(query.limit(limit).offset(offset))
         ]
     }
 

@@ -11,11 +11,6 @@ class NadraRequest(BaseModel):
     cnic: str
 
 
-class PayRequest(BaseModel):
-    cnic: str
-    amount: int
-
-
 class SmsRequest(BaseModel):
     phone: str
     message: str
@@ -34,10 +29,9 @@ def nadra_verify(body: NadraRequest):
     return {"verified": True, "name": person["name"], "note": "FAKE NADRA"}
 
 
-@router.post("/raast/pay")
-def raast_pay(body: PayRequest):
-    return {"status": "paid", "transaction_id": "FAKE-TXN-0001",
-            "cnic": body.cnic, "amount": body.amount, "note": "FAKE RAAST"}
+# The old unauthenticated POST /api/mock/raast/pay was removed: simulated money
+# moves only through the key-protected POST /mock/raast/disburse, which the
+# backend worker calls after an officer approves a case.
 
 
 @router.post("/sms/send")
