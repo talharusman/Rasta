@@ -307,6 +307,7 @@ export async function createBackendCase(payload: {
     household_size: number;
     payment_account: string;
     citizen_phone?: string;
+    dob?: string;
   };
 }): Promise<any> {
   return request<BackendCase>("/api/v1/cases", {
@@ -432,6 +433,58 @@ export async function requestAiDecision(): Promise<AiDecisionResponse> {
   });
 }
 
+export type LiveMockConditions = Record<"nadra_timeout" | "nadra_outage" | "identity_mismatch"
+  | "duplicated_response" | "malformed_response" | "raast_outage" | "sms_failure", boolean>;
+
+export const getLiveMockConditions = () => request<LiveMockConditions>("/api/v1/admin/mock-conditions");
+export const setLiveMockConditions = (changes: Partial<LiveMockConditions>) =>
+  request<LiveMockConditions>("/api/v1/admin/mock-conditions", { method: "PUT", body: JSON.stringify(changes) });
+
+export interface DocumentPreview {
+  quality_ok: boolean | null;
+  quality_note: string | null;
+  suggested_action: string;
+  extracted_fields: Record<string, { value: string | null; confidence: number; warning?: string }>;
+}
+
+export function previewIdentityDocument(citizenId: string, file: File, signal: AbortSignal) {
+  const body = new FormData();
+  body.append("citizen_id", citizenId);
+  body.append("file", file);
+  body.append("consent", "true");
+  return request<DocumentPreview>("/api/v1/documents/preview", { method: "POST", body, signal });
+}
+
+export type NadraFailureScenario = "normal" | "timeout" | "not_found" | "name_mismatch";
+export type RaastFailureScenario = "normal" | "mismatch" | "timeout";
+
+export interface DemoFailureScenarios {
+  nadra: NadraFailureScenario;
+  raast: RaastFailureScenario;
+}
+
+export const DEMO_FAILURES_KEY = "rasta.demo.failure_scenarios";
+
+export function getDemoFailureScenarios(): DemoFailureScenarios {
+  try {
+    const raw = localStorage.getItem(DEMO_FAILURES_KEY);
+    if (!raw) return { nadra: "normal", raast: "normal" };
+    const parsed = JSON.parse(raw);
+    return {
+      nadra: parsed.nadra || "normal",
+      raast: parsed.raast || "normal",
+    };
+  } catch {
+    return { nadra: "normal", raast: "normal" };
+  }
+}
+
+export function saveDemoFailureScenarios(scenarios: DemoFailureScenarios): void {
+  try {
+    localStorage.setItem(DEMO_FAILURES_KEY, JSON.stringify(scenarios));
+  } catch {}
+}
+
 export interface NadraVerifyResponse {
   verified: boolean;
   name?: string;
@@ -439,10 +492,57 @@ export interface NadraVerifyResponse {
 }
 
 export async function verifyNadra(cnic: string): Promise<NadraVerifyResponse> {
+  const scenario = getDemoFailureScenarios();
+  if (scenario.nadra === "timeout") {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    throw new ApiError(504, "Simulated Timeout: NADRA identity gateway did not respond within the deadline.");
+  }
+  if (scenario.nadra === "not_found") {
+    return {
+      verified: false,
+      note: "Simulated Record Not Found: Citizen identity does not exist in the NADRA database.",
+    };
+  }
+  if (scenario.nadra === "name_mismatch") {
+    return {
+      verified: false,
+      name: "Different Person",
+      note: "Simulated Name Mismatch: Record name does not match citizen claim.",
+    };
+  }
+
   return request<NadraVerifyResponse>("/api/mock/nadra/verify", {
     method: "POST",
     body: JSON.stringify({ cnic }),
   });
+}
+
+export interface RaastPayResponse {
+  status: string;
+  transaction_id: string;
+  amount: number;
+  note: string;
+}
+
+// Offline-demo only. The old unauthenticated POST /api/mock/raast/pay route was
+// removed from the backend (live payments go through the key-protected
+// /mock/raast/disburse after an officer approves), so this never touches the
+// network. It still honours the admin's simulated failure scenarios.
+export async function simulateRaastDisbursement(amount: number): Promise<RaastPayResponse> {
+  const scenario = getDemoFailureScenarios();
+  if (scenario.raast === "timeout") {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    throw new ApiError(504, "Simulated Timeout: Raast payment switch timed out.");
+  }
+  if (scenario.raast === "mismatch") {
+    throw new ApiError(422, "Simulated Account Mismatch: Raast title fetch failed for beneficiary account.");
+  }
+  return {
+    status: "simulated",
+    transaction_id: `DEMO-TXN-${Math.floor(10000 + Math.random() * 90000)}`,
+    amount,
+    note: "SIMULATED - offline demo, no money moved",
+  };
 }
 
 export interface SmsSendResponse {
@@ -463,6 +563,7 @@ export type EvidenceType = "identity_proof" | "income_proof";
 
 export interface BackendCase {
   case_id: string;
+  citizen_id: string;
   status: "draft" | "submitted" | "processing" | "cleared" | "needs_proof" | "human_review" | "approved" | "rejected" | "closed";
   revision: number;
   assigned_officer_id: string | null;
@@ -478,6 +579,7 @@ export interface BackendCase {
     household_size: number;
     payment_account: string;
     citizen_phone?: string | null;
+    dob?: string | null;
   };
   documents: { id: string; type: EvidenceType; content_type: string; sha256: string }[];
   decision?: { route: string; confidence: number | null; identity_verified: boolean; rule_version: number; model_version: string | null };

@@ -76,3 +76,40 @@
 @media(min-width:801px) and (max-width:1100px){
   .low-bandwidth-banner{margin-left:214px}
 }
+
+.scam-result-card--warning{background:#fffbeb;border-color:#fcd34d;color:#92400e}
+.scam-notice-warning{background:#fef3c7;border-left:3px solid #d97706;padding:6px 10px;border-radius:4px;color:#92400e;font-size:11px}
+.scam-notice-caution{background:#ecfdf5;border-left:3px solid #059669;padding:6px 10px;border-radius:4px;color:#065f46;font-size:11px}
+.scam-confidence-badge{background:rgba(0,0,0,0.06);padding:2px 8px;border-radius:4px;font-size:10px}
+
+.policy-model-card{display:inline-flex;align-items:center;gap:8px;background:#f5ecdf;border:1px solid #dcbe9b;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:600;color:#5a371c;margin-bottom:12px}
+
+.save-state-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:600}
+.save-state-badge--saved{background:#f2f8f4;border:1px solid #b3dcbe;color:#236338}
+.save-state-badge--syncing{background:#fff8ee;border:1px solid #fed7aa;color:#9a3412}
+.save-state-badge--offline{background:#fef2f2;border:1px solid #fecaca;color:#991b1b}
+
+.doc-scanner-container{padding:16px}
+.scanner-dropzone{border:2px dashed #d5c4b1;background:#fdfcf9;border-radius:8px;padding:24px 16px;text-align:center}
+.scanner-field--uncertain{background:#fefce8!important;border:1px solid #facc15!important}
+
+.resubmission-checklist{display:grid;gap:12px;margin:16px 0}
+.resubmission-item{border:1px solid #e2d5c5;border-radius:8px;padding:14px;background:#fffdfa}
+.resubmission-item--ready{border-color:#86efac;background:#f0fdf4}
+.resubmission-status-pill{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:600}
+
+.admin-failure-card{margin-top:20px;padding:20px}
+.admin-prototype-warning{background:#fff8ed;border:1px solid #fcd34d;padding:10px 14px;border-radius:6px;margin-bottom:16px;color:#92400e;font-size:11px}
+
+
+.doc-scanner-container {
+  display: grid;
+  gap: 0.75rem;
+  margin-block: 0.75rem 1rem;
+  padding: 1rem;
+}
+
+.doc-scanner-container h4,
+.doc-scanner-container p {
+  margin: 0;
+}

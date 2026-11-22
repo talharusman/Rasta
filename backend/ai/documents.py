@@ -128,7 +128,7 @@ def run_ocr(img: Image.Image) -> Optional[str]:
         return None
     import pytesseract
     try:
-        return pytesseract.image_to_string(img.convert("L"))
+        return pytesseract.image_to_string(img.convert("L"), timeout=5)
     except Exception:
         return None
 

@@ -8,7 +8,7 @@ from ai.decision import explain
 
 from .models import Audit, Case, Citizen, Consent, Decision, Document, Job, Notification, Rule
 from .services import (
-    Actor, active_rule, change, evaluate, factory, fail, get_resource, roles, settings,
+    Actor, active_rule, audit, change, evaluate, factory, fail, get_resource, roles, settings,
 )
 from app.jobs.queue import enqueue_notification
 from app.jobs.models import Job as QueueJob
@@ -50,7 +50,7 @@ def get_case(case_id):
         return {
             'id': str(case.id), 'status': case.status, 'citizen_id': str(case.citizen_id),
             'tenant_id': str(case.tenant_id), 'claim_type': case.claim_type,
-            'household_size': case.data.get('household_size'), 'required_documents': case.required_documents,
+            'household_size': case.data.get('household_size'), 'dob': case.data.get('dob'), 'required_documents': case.required_documents,
             'helper_id': str(case.helper_id) if case.helper_id else None,
             'mock_identity_id': case.data['mock_identity_id'], 'applicant_name': case.data['name'],
             'monthly_income': case.data['monthly_income'], 'account_id': case.data['payment_account'],
@@ -220,6 +220,9 @@ def record_decision(case_id, decision):
         change(session, _request(case), case, route,
                payload.get('officer_note', '') if route == 'human_review' else '',
                'decision_recorded', actor_type='agent')
+        audit(session, _request(case), 'ai_decision', case.id,
+              {'rule_version': rule.version, 'model_version': payload.get('model_version'), 'route': route},
+              actor_type='agent')
         _notify(session, case, payload['user_explanation'], f'result-{case.id}-{generation}')
         return payload
 
