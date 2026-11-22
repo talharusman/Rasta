@@ -1,0 +1,21 @@
+{
+  "documents": {
+    "1df77a97f6df9b5f616cb6323e6ae373bbc5e59e0e84747720ab93874835d766": {
+      "type": "identity_proof",
+      "file": "identity_proof.png",
+      "fields": {
+        "name": "Muhammad Ali",
+        "mock_identity_id": "MOCK-123456",
+        "date_of_birth": "1990-05-12"
+      }
+    },
+    "1cc477adaf5a6467834f9c57782d662007c5d1531a7d0169bf39853eaee054f8": {
+      "type": "income_proof",
+      "file": "income_proof.png",
+      "fields": {
+        "name": "Muhammad Ali",
+        "monthly_income": 20000
+      }
+    }
+  }
+}

@@ -20,6 +20,8 @@ from shared import db as shared_db
 
 from .models import Job
 
+AI_ASSIST_JOB = "ai_assistance"
+
 STATUSES = ("queued", "running", "done", "failed")
 
 

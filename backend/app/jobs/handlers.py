@@ -12,7 +12,7 @@ from app.agent import orchestrator, platform_bridge
 from app.integrations.providers import registry
 from app.integrations.providers.base import NotificationStatus, PaymentResult, PaymentStatus
 
-from .queue import JobFailedPermanently, aenqueue, merge_payload
+from .queue import AI_ASSIST_JOB, JobFailedPermanently, aenqueue, merge_payload
 
 logger = logging.getLogger("m3.jobs.handlers")
 
@@ -176,6 +176,14 @@ async def reconcile_payment(payload: Dict[str, Any], job: Dict[str, Any]) -> Dic
     return await _handle_payment_result(case_id, result, from_reconcile=True)
 
 
+async def ai_assistance(payload: Dict[str, Any], job: Dict[str, Any]) -> None:
+    if not platform_bridge.is_live():
+        raise JobFailedPermanently("AI assistance requires the platform database")
+    from rasta_platform.assistance import run_assistance
+
+    await run_assistance(payload["case_id"], payload["generation"])
+
+
 Handler = Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[Optional[Dict[str, Any]]]]
 
 HANDLERS: Dict[str, Handler] = {
@@ -184,4 +192,5 @@ HANDLERS: Dict[str, Handler] = {
     "check_delivery": check_delivery,
     "disburse_case": disburse_case,
     "reconcile_payment": reconcile_payment,
+    AI_ASSIST_JOB: ai_assistance,
 }

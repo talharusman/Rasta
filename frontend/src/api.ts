@@ -486,6 +486,19 @@ export async function fetchBackendHistory(caseId: string) {
   );
 }
 
+export interface OfficerAssistance {
+  status: "queued" | "complete" | "partial" | "fallback" | "skipped";
+  provider?: string;
+  model?: string;
+  summary?: string[] | null;
+  documents?: {
+    document_id: string;
+    type: EvidenceType;
+    fields: Record<string, string | number | null>;
+    conflicts: string[];
+  }[];
+}
+
 export async function fetchBackendTrace(caseId: string) {
   return request<{
     rule_version: number;
@@ -493,6 +506,7 @@ export async function fetchBackendTrace(caseId: string) {
       model_version?: string;
       reason?: string;
       flags?: string[];
+      ai_assist?: OfficerAssistance;
       auditor_trace?: { evaluate_trace?: { routing_reason?: string } | null };
     };
   }>(`/api/v1/cases/${caseId}/decision-trace`);
