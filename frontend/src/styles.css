@@ -61,3 +61,18 @@
 .api-badge--demo{background:#fdf0e0;color:#9f6526;border:1px solid #e4c29a}
 
 .empty-results{padding:30px;text-align:center;color:#8c7566;font-size:12px}
+
+/* Layout: the fixed sidebar scrolls on its own, and only when its content is
+   taller than the window (small screens / zoomed browsers). Scrolling it never
+   moves the page, and the page scrolls without moving the sidebar. */
+@media(min-width:801px){
+  .sidebar{overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.25) transparent}
+  .sidebar>*{flex-shrink:0}
+  .sidebar::-webkit-scrollbar{width:6px}
+  .sidebar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.25);border-radius:6px}
+  /* The low-data banner sits beside the sidebar instead of underneath it. */
+  .low-bandwidth-banner{margin-left:258px}
+}
+@media(min-width:801px) and (max-width:1100px){
+  .low-bandwidth-banner{margin-left:214px}
+}
