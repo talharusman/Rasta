@@ -19,7 +19,7 @@ from app.agent import platform_bridge
 
 from . import handlers
 from .models import Job, WorkerHeartbeat
-from .queue import JobFailedPermanently, session, snapshot
+from .queue import AI_ASSIST_JOB, JobFailedPermanently, session, snapshot
 
 logger = logging.getLogger("m3.jobs.worker")
 
@@ -31,6 +31,7 @@ BATCH = 5
 
 _task: Optional["asyncio.Task[Any]"] = None
 _inflight: Set["asyncio.Task[Any]"] = set()
+_assistance_task: Optional["asyncio.Task[Any]"] = None
 
 
 def retry_delay(attempts: int) -> float:
@@ -74,6 +75,10 @@ def _audit_failed(job: Dict[str, Any], error: str) -> None:
             payload = job.get("payload") or {}
             if job["kind"] in ("send_notification", "check_delivery") and payload.get("notification_id"):
                 platform_bridge.update_notification_state(payload["notification_id"], "failed")
+            if job["kind"] == AI_ASSIST_JOB:
+                from rasta_platform.assistance import fail_assistance
+
+                fail_assistance(payload["case_id"], payload["generation"])
             if job["kind"] == "process_case":
                 platform_bridge.live_call("stop_processing", payload["case_id"], payload.get("generation"),
                                           "Processing stopped after the worker exhausted its retries")
@@ -109,14 +114,16 @@ def reset_stuck() -> int:
     return reset
 
 
-def claim(limit: int) -> List[Dict[str, Any]]:
-    """Take up to `limit` due jobs and mark them running, in one transaction. On Postgres the
-    row locks (SKIP LOCKED) mean two workers can never claim the same job."""
+def claim(limit: int, allow_assistance: bool = True) -> List[Dict[str, Any]]:
+    """Claim core work first and reserve at most one slot for optional assistance."""
     with session() as s:
-        rows = s.execute(
-            select(Job).where(Job.status == "queued", Job.run_after <= _now())
-            .order_by(Job.run_after, Job.created_at).limit(limit).with_for_update(skip_locked=True)
-        ).scalars().all()
+        due = select(Job).where(Job.status == "queued", Job.run_after <= _now())
+        due = due.order_by(Job.run_after, Job.created_at).with_for_update(skip_locked=True)
+        rows = list(s.scalars(due.where(Job.kind != AI_ASSIST_JOB).limit(limit)))
+        if allow_assistance and len(rows) < limit:
+            assistance = s.scalar(due.where(Job.kind == AI_ASSIST_JOB).limit(1))
+            if assistance is not None:
+                rows.append(assistance)
         for job in rows:
             job.status = "running"
         s.commit()
@@ -176,16 +183,20 @@ async def run_once(wait: bool = True) -> int:
     """One worker pass: heartbeat, reset stuck jobs, claim due jobs, run them.
     wait=True returns when they finish (tests); the loop uses wait=False so a slow job
     does not hold up the others. Returns how many jobs were claimed."""
+    global _assistance_task
     await asyncio.to_thread(heartbeat)
     await asyncio.to_thread(reset_stuck)
     room = MAX_CONCURRENT - len(_inflight)
     if room <= 0:
         return 0
-    claimed = await asyncio.to_thread(claim, min(BATCH, room))
+    allow_assistance = _assistance_task is None or _assistance_task.done()
+    claimed = await asyncio.to_thread(claim, min(BATCH, room), allow_assistance)
     tasks = []
     for job in claimed:
         task = asyncio.ensure_future(run_job(job))
         _inflight.add(task)
+        if job["kind"] == AI_ASSIST_JOB:
+            _assistance_task = task
         task.add_done_callback(_inflight.discard)
         tasks.append(task)
     if wait and tasks:

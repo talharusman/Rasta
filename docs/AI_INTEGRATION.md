@@ -38,3 +38,5 @@ Use synthetic identities, documents, phone numbers, and messages. For scenarios 
 | Scam Shield | As a citizen with processing consent, try “Send a processing fee to receive relief”, “Click here for details”, and “Your appointment is tomorrow at 10”. Check for likely scam, uncertain, and no common indicators, with the reason and advice. Withdraw consent or interrupt the AI service and confirm the browser shows an error. |
 | Policy and audit history | Publish a new threshold after a case enters processing. The running case should keep its pinned version, while new submissions use the updated policy. Review the rules and reasons in the auditor view, then switch to Urdu and check the saved case explanation. |
 | Officer approval and payment | Assign and approve a cleared claim. Repeat the approval request or try the mock payment timeout and reconciliation path. Confirm that at most one payout is created and a transaction reference is shown only after confirmation. Check in-app notices and optional SMS delivery. |
+
+For optional Gemini vision and officer summaries, see [Gemini assistance](GEMINI_ASSISTANCE.md).

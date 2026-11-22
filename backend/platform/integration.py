@@ -211,6 +211,9 @@ def record_decision(case_id, decision):
         case.required_documents = sorted(set(missing) | requested)
         if route == 'needs_proof' and not case.required_documents:
             case.required_documents = ['identity_proof']
+        from .assistance import schedule
+
+        schedule(session, case, payload)
         session.add(Decision(tenant_id=case.tenant_id, case_id=case.id,
                              processing_generation=generation, rule_version_id=rule.id, payload=payload))
         run.state = 'completed'

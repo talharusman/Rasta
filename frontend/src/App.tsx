@@ -19,6 +19,7 @@ import {
   downloadBackendEvidence,
   fetchBackendHistory,
   fetchBackendTrace,
+  type OfficerAssistance,
   type EvidenceType,
   checkBackendScam,
   type ScamAssessment,
@@ -1872,6 +1873,45 @@ function EvidenceInputs({ evidence, onChange, required = [] }: {
   </>;
 }
 
+function ModelAssistance({ result }: { result: OfficerAssistance }) {
+  const fields = {
+    name: "Name", mock_identity_id: "Mock identity ID",
+    date_of_birth: "Date of birth", monthly_income: "Monthly income",
+  } as Record<string, string>;
+  return (
+    <section className="reason-list" aria-label="AI officer assistance">
+      <h4>{result.provider === "openrouter" ? "OpenRouter" : result.provider === "gemini" ? "Gemini" : "AI"} officer assistance</h4>
+      {result.status === "queued" ? (
+        <p>Assistance is queued. You can review the case now.</p>
+      ) : (
+        <>
+          {result.summary?.length ? (
+            <>
+              <h5>Suggested review summary</h5>
+              <ul>{result.summary.map((item) => <li key={item}>{item}</li>)}</ul>
+            </>
+          ) : <p>Use the decision trace and officer notes for this review.</p>}
+          {result.documents?.map((document) => (
+            <dl key={document.document_id}>
+              <dt>{document.type === "identity_proof" ? "Identity proof" : "Income proof"} suggestions · <a href={`#evidence-${document.document_id}`}>source file</a></dt>
+              {Object.entries(document.fields).map(([key, value]) => (
+                <React.Fragment key={key}>
+                  <dt>{fields[key] ?? key}</dt>
+                  <dd>{value ?? "Unreadable"}{document.conflicts.includes(key) ? " · differs from claim" : ""}</dd>
+                </React.Fragment>
+              ))}
+            </dl>
+          ))}
+          {result.status === "complete" && !result.documents?.length &&
+            <p>No approved image suggestions are available for this decision.</p>}
+          {(result.status === "partial" || result.status === "fallback") &&
+            <p>Some assistance was unavailable. Check the submitted evidence for anything missing.</p>}
+        </>
+      )}
+    </section>
+  );
+}
+
 function CaseDetail() {
   const { caseId } = useParams();
   const { user } = useAuth();
@@ -1895,7 +1935,7 @@ function CaseDetail() {
   const [liveHistory, setLiveHistory] = useState<{ caseId: string; revision: number; items: CaseRecord["timeline"] }>();
   const [trace, setTrace] = useState<{
     caseId: string; revision: number; rule: number; model?: string;
-    reason?: string; aiReason?: string; flags?: string[];
+    reason?: string; aiReason?: string; flags?: string[]; assistance?: OfficerAssistance;
   }>();
   const revision = targetCase?.backendRevision;
   const actorId = user?.id;
@@ -1911,12 +1951,24 @@ function CaseDetail() {
         description: item.notes, type: "officer",
       })) });
     }).catch(() => { if (!cancelled) setLiveHistory(undefined); });
-    if (canTrace) void fetchBackendTrace(caseId).then((result) => {
-      if (!cancelled) setTrace({ caseId, revision, rule: result.rule_version, model: result.payload.model_version,
-        reason: result.payload.reason, aiReason: result.payload.auditor_trace?.evaluate_trace?.routing_reason,
-        flags: result.payload.flags });
-    }).catch(() => { if (!cancelled) setTrace(undefined); });
-    return () => { cancelled = true; };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = Date.now() + 60000;
+    const loadTrace = async () => {
+      try {
+        const result = await fetchBackendTrace(caseId);
+        if (cancelled) return;
+        setTrace({ caseId, revision, rule: result.rule_version, model: result.payload.model_version,
+          reason: result.payload.reason, aiReason: result.payload.auditor_trace?.evaluate_trace?.routing_reason,
+          flags: result.payload.flags, assistance: result.payload.ai_assist });
+        if (result.payload.ai_assist?.status === "queued" && Date.now() < deadline) {
+          timer = setTimeout(loadTrace, 3000);
+        }
+      } catch {
+        if (!cancelled) setTrace(undefined);
+      }
+    };
+    if (canTrace) void loadTrace();
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [actorId, caseId, revision, canTrace]);
 
   if (!targetCase) {
@@ -2159,7 +2211,7 @@ function CaseDetail() {
               <PanelHeader title="Submitted evidence" />
               <ul>
                 {targetCase.documents?.map((doc, index) => (
-                  <li key={doc.id}>
+                  <li key={doc.id} id={`evidence-${doc.id}`}>
                     <button type="button" className="outline-button" onClick={async () => {
                       try {
                         const blob = await downloadBackendEvidence(targetCase.id, doc.id);
@@ -2237,6 +2289,9 @@ function CaseDetail() {
               )}
             </div>
           )}
+          {canTrace && trace?.caseId === caseId && trace?.revision === revision && trace?.assistance
+            && (targetCase.backendStatus === "cleared" || targetCase.backendStatus === "needs_proof"
+              || targetCase.backendStatus === "human_review") && <ModelAssistance result={trace.assistance} />}
           {!isLive && <div className="reason-list">
             <h4>Signals and Evidence</h4>
             <div className="reason">
