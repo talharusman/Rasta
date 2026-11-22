@@ -379,6 +379,36 @@ export async function requestAiDecision(): Promise<AiDecisionResponse> {
   });
 }
 
+export type NadraFailureScenario = "normal" | "timeout" | "not_found" | "name_mismatch";
+export type RaastFailureScenario = "normal" | "mismatch" | "timeout";
+
+export interface DemoFailureScenarios {
+  nadra: NadraFailureScenario;
+  raast: RaastFailureScenario;
+}
+
+export const DEMO_FAILURES_KEY = "rasta.demo.failure_scenarios";
+
+export function getDemoFailureScenarios(): DemoFailureScenarios {
+  try {
+    const raw = localStorage.getItem(DEMO_FAILURES_KEY);
+    if (!raw) return { nadra: "normal", raast: "normal" };
+    const parsed = JSON.parse(raw);
+    return {
+      nadra: parsed.nadra || "normal",
+      raast: parsed.raast || "normal",
+    };
+  } catch {
+    return { nadra: "normal", raast: "normal" };
+  }
+}
+
+export function saveDemoFailureScenarios(scenarios: DemoFailureScenarios): void {
+  try {
+    localStorage.setItem(DEMO_FAILURES_KEY, JSON.stringify(scenarios));
+  } catch {}
+}
+
 export interface NadraVerifyResponse {
   verified: boolean;
   name?: string;
@@ -386,6 +416,25 @@ export interface NadraVerifyResponse {
 }
 
 export async function verifyNadra(cnic: string): Promise<NadraVerifyResponse> {
+  const scenario = getDemoFailureScenarios();
+  if (scenario.nadra === "timeout") {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    throw new ApiError(504, "Simulated Timeout: NADRA identity gateway did not respond within the deadline.");
+  }
+  if (scenario.nadra === "not_found") {
+    return {
+      verified: false,
+      note: "Simulated Record Not Found: Citizen identity does not exist in the NADRA database.",
+    };
+  }
+  if (scenario.nadra === "name_mismatch") {
+    return {
+      verified: false,
+      name: "Different Person",
+      note: "Simulated Name Mismatch: Record name does not match citizen claim.",
+    };
+  }
+
   return request<NadraVerifyResponse>("/api/mock/nadra/verify", {
     method: "POST",
     body: JSON.stringify({ cnic }),
@@ -401,6 +450,15 @@ export interface RaastPayResponse {
 }
 
 export async function disburseRaast(cnic: string, amount: number): Promise<RaastPayResponse> {
+  const scenario = getDemoFailureScenarios();
+  if (scenario.raast === "timeout") {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    throw new ApiError(504, "Simulated Timeout: Raast payment switch timed out.");
+  }
+  if (scenario.raast === "mismatch") {
+    throw new ApiError(422, "Simulated Account Mismatch: Raast title fetch failed for beneficiary account.");
+  }
+
   return request<RaastPayResponse>("/api/mock/raast/pay", {
     method: "POST",
     body: JSON.stringify({ cnic, amount }),

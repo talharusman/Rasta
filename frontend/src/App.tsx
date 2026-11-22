@@ -24,10 +24,28 @@ import {
   checkBackendScam,
   type ScamAssessment,
   verifyNadra,
+  getDemoFailureScenarios,
+  saveDemoFailureScenarios,
+  type NadraFailureScenario,
+  type RaastFailureScenario,
 } from "./api";
 import { useAuth } from "./auth";
 import { useData } from "./store";
 import type { CaseRecord, Role } from "./types";
+import { DocumentScanner } from "./components/DocumentScanner";
+import {
+  getCitizenOutcomeMessage,
+  getCitizenFriendlyStatus,
+  getCitizenFriendlyRoute,
+} from "./outcomeWording";
+import {
+  computeDraftFingerprint,
+  getOrGenerateIdempotencyKey,
+  clearIdempotencyKey,
+  saveClaimDraft,
+  loadClaimDraft,
+  clearClaimDraft,
+} from "./claimStorage";
 import "./styles.css";
 
 // --- Icons ---
@@ -803,18 +821,47 @@ function CitizenHome() {
         const result = await checkBackendScam(user.citizen_id, msg);
         if (request === scamRequest.current) setScamAnalysis({ result, demo: false });
       } else {
-        const indicators = ["lottery", "fee", "send money", "pin", "otp"]
-          .filter((trigger) => msg.toLowerCase().includes(trigger));
-        const flagged = indicators.length > 0;
+        const lower = msg.toLowerCase();
+        const scamKeywords = ["lottery", "fee", "send money", "pin", "otp", "password", "jazzcash", "easypaisa", "advance fee", "transfer"];
+        const uncertainKeywords = ["urgent", "click", "link", "prize", "congratulations", "mubarak", "claim", "verify", "8171", "account"];
+
+        const foundScam = scamKeywords.filter((trigger) => lower.includes(trigger));
+        const foundUncertain = uncertainKeywords.filter((trigger) => lower.includes(trigger));
+
+        let label: "likely_scam" | "uncertain" | "no_scam_indicators";
+        let confidence: number;
+        let indicators: string[];
+        let explanation: string;
+        let recommended_action: string;
+
+        if (foundScam.length > 0) {
+          label = "likely_scam";
+          confidence = 0.94;
+          indicators = foundScam.map((k) => `Detected high-risk keyword or payment solicitation: "${k}"`);
+          explanation = "The message contains patterns characteristic of advance-fee, lottery, or credential-harvesting fraud.";
+          recommended_action = "Do not transfer money or share your PIN/OTP. Official relief programs never require an upfront fee.";
+        } else if (foundUncertain.length > 0) {
+          label = "uncertain";
+          confidence = 0.68;
+          indicators = foundUncertain.map((k) => `Ambiguous or unsolicited signal: "${k}"`);
+          explanation = "The message references relief or urgency without standard institutional verification credentials.";
+          recommended_action = "We cannot guarantee this is safe. Do not share OTPs. Verify directly with an official relief office.";
+        } else {
+          label = "no_scam_indicators";
+          confidence = 0.95;
+          indicators = ["No known scam patterns or financial solicitation keywords detected"];
+          explanation = "No suspicious patterns detected, but always stay cautious.";
+          recommended_action = "Always verify unsolicited messages through the official RASTA portal or government helpline.";
+        }
+
         setScamAnalysis({
           demo: true,
           result: {
-            label: flagged ? "likely_scam" : "no_scam_indicators",
-            confidence: 0,
+            label,
+            confidence,
             indicators,
-            explanation: flagged ? "The message contains common scam keywords."
-              : "No common scam keywords were found. Verify the message through an official channel.",
-            recommended_action: "Keep codes and PINs private. Verify the message with an official relief office.",
+            explanation,
+            recommended_action,
           },
         });
       }
@@ -890,7 +937,7 @@ function CitizenHome() {
           <div className="panel citizen-status">
             <PanelHeader title="Your Active Request" to={`/cases/${latestCase.id}`} />
             <strong>{latestCase.id}</strong>
-            <Badge tone={latestCase.tone}>{latestCase.status}</Badge>
+            <Badge tone={latestCase.tone}>{getCitizenFriendlyStatus(latestCase.status, latestCase.backendStatus)}</Badge>
 
             {/* Visual 4-step status tracker */}
             <div className="status-tracker">
@@ -924,16 +971,8 @@ function CitizenHome() {
               </div>
             </div>
 
-            <p>
-              {latestCase.status === "Needs review"
-                ? "Your claim is currently being carefully reviewed by our Department Officer. No action is required from you."
-                : latestCase.status === "Verified"
-                ? paymentText(latestCase)
-                : latestCase.status === "Checks passed"
-                ? "Automated checks passed. An officer will review the application."
-                : latestCase.status === "More information"
-                ? "An officer has requested additional documentation. Please check your SMS notices."
-                : "Your claim has been registered in the system."}
+            <p style={{ marginTop: 12, fontWeight: 500, lineHeight: 1.5 }}>
+              {getCitizenOutcomeMessage(latestCase.status, latestCase.aiRoute, latestCase.backendStatus)}
             </p>
 
             <Link to={`/cases/${latestCase.id}`} className="explain-link">
@@ -986,6 +1025,17 @@ function CitizenHome() {
               className="outline-button"
               onClick={() =>
                 setScamInput(
+                  "Urgent: Mubarak! Your 8171 grant registration requires mobile wallet verification. Reply to confirm."
+                )
+              }
+            >
+              Test Ambiguous Urgent Alert
+            </button>
+            <button
+              type="button"
+              className="outline-button"
+              onClick={() =>
+                setScamInput(
                   "Official Notice: Your Sindh Social Relief case REL-20481 has been received."
                 )
               }
@@ -1005,21 +1055,65 @@ function CitizenHome() {
 
           {scamError && <p className="form-error" role="alert">{scamError}</p>}
           {scamAnalysis && (
-            <div aria-live="polite"
+            <div
+              aria-live="polite"
               className={`scam-result-card ${
-                scamAnalysis.result.label === "likely_scam" ? "scam-result-card--danger"
-                  : scamAnalysis.result.label === "no_scam_indicators" ? "scam-result-card--safe" : ""
-              }`}>
-              <strong>
-                {{ likely_scam: "Likely scam", uncertain: "Uncertain",
-                   no_scam_indicators: "No common scam indicators found" }[scamAnalysis.result.label]}
-                {scamAnalysis.demo && <span className="api-badge api-badge--demo">Browser demo</span>}
-              </strong>
-              <p>{scamAnalysis.result.explanation}</p>
-              {scamAnalysis.result.indicators.length > 0 && (
-                <ul>{scamAnalysis.result.indicators.map((indicator) => <li key={indicator}>{indicator}</li>)}</ul>
+                scamAnalysis.result.label === "likely_scam"
+                  ? "scam-result-card--danger"
+                  : scamAnalysis.result.label === "uncertain"
+                  ? "scam-result-card--warning"
+                  : "scam-result-card--safe"
+              }`}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <strong style={{ fontSize: 13 }}>
+                  {scamAnalysis.result.label === "likely_scam" && "🚨 Likely Scam"}
+                  {scamAnalysis.result.label === "uncertain" && "⚠️ Uncertain"}
+                  {scamAnalysis.result.label === "no_scam_indicators" && "✅ No Scam Indicators"}
+                  {scamAnalysis.demo && (
+                    <span className="api-badge api-badge--demo" style={{ marginLeft: 8 }}>
+                      Browser demo
+                    </span>
+                  )}
+                </strong>
+                <span className="scam-confidence-badge" style={{ fontWeight: 600, fontSize: 11 }}>
+                  Confidence: {Math.round(scamAnalysis.result.confidence <= 1 ? scamAnalysis.result.confidence * 100 : scamAnalysis.result.confidence)}%
+                </span>
+              </div>
+
+              {/* Status specific explicit warning / caution */}
+              {scamAnalysis.result.label === "uncertain" && (
+                <div className="scam-notice-warning" role="alert" style={{ fontWeight: 600 }}>
+                  We cannot guarantee this is safe. Do not share OTPs.
+                </div>
               )}
-              <p>{scamAnalysis.result.recommended_action}</p>
+              {scamAnalysis.result.label === "no_scam_indicators" && (
+                <div className="scam-notice-caution" role="status" style={{ fontWeight: 600 }}>
+                  No suspicious patterns detected, but always stay cautious.
+                </div>
+              )}
+
+              <p style={{ marginTop: 4 }}>{scamAnalysis.result.explanation}</p>
+
+              {/* Indicators as bullet points */}
+              <div style={{ marginTop: 6 }}>
+                <strong style={{ fontSize: 11, display: "block", marginBottom: 3 }}>
+                  Signals & Indicators:
+                </strong>
+                <ul style={{ margin: "0 0 6px 18px", padding: 0, fontSize: 11 }}>
+                  {scamAnalysis.result.indicators && scamAnalysis.result.indicators.length > 0 ? (
+                    scamAnalysis.result.indicators.map((indicator) => (
+                      <li key={indicator}>{indicator}</li>
+                    ))
+                  ) : (
+                    <li>No suspicious indicators detected</li>
+                  )}
+                </ul>
+              </div>
+
+              <p style={{ marginTop: 4 }}>
+                <strong>Recommended safe action:</strong> {scamAnalysis.result.recommended_action}
+              </p>
             </div>
           )}
         </div>
@@ -1424,6 +1518,14 @@ function AdminHome() {
     ai: { connected: boolean; status: string };
     mock: { connected: boolean; status: string };
   } | null>(null);
+  const [failureScenarios, setFailureScenarios] = useState(() => getDemoFailureScenarios());
+  const [failureNotice, setFailureNotice] = useState("");
+
+  const handleApplyFailures = () => {
+    saveDemoFailureScenarios(failureScenarios);
+    setFailureNotice("Demo failure scenario settings applied.");
+    setTimeout(() => setFailureNotice(""), 3500);
+  };
 
   useEffect(() => {
     apiHealth().then(setHealth).catch(() => {});
@@ -1550,6 +1652,95 @@ function AdminHome() {
         </div>
       </section>
 
+      {/* Demo Failure Scenarios (Mock Failure Controls) */}
+      <section className="panel admin-failure-card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <PanelHeader title="Demo Failure Scenarios" />
+          <span className="api-badge api-badge--demo">Frontend Demo Configuration</span>
+        </div>
+
+        <div className="admin-prototype-warning" role="alert">
+          <strong style={{ display: "block", marginBottom: 2 }}>⚠️ Prototype-only warning</strong>
+          <span>
+            These controls simulate network and partner API exceptions for testing and verification.
+            They do not alter backend databases.
+          </span>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
+          <div>
+            <label style={{ display: "block", marginBottom: 6, fontWeight: 600, fontSize: 11, color: "#604839" }}>
+              NADRA Verification Scenario
+            </label>
+            <select
+              value={failureScenarios.nadra}
+              onChange={(e) =>
+                setFailureScenarios((prev) => ({ ...prev, nadra: e.target.value as NadraFailureScenario }))
+              }
+              style={{ width: "100%", padding: 10, border: "1px solid #d9cdbf", borderRadius: 6, fontSize: 12, background: "#fff" }}
+            >
+              <option value="normal">Normal</option>
+              <option value="timeout">Simulate Timeout</option>
+              <option value="not_found">Record Not Found</option>
+              <option value="name_mismatch">Name Mismatch</option>
+            </select>
+            <small style={{ color: "#806b5e", fontSize: 10, display: "block", marginTop: 4 }}>
+              Simulates /api/mock/nadra/verify response during citizen identity checks.
+            </small>
+          </div>
+
+          <div>
+            <label style={{ display: "block", marginBottom: 6, fontWeight: 600, fontSize: 11, color: "#604839" }}>
+              Raast Instant Payment Scenario
+            </label>
+            <select
+              value={failureScenarios.raast}
+              onChange={(e) =>
+                setFailureScenarios((prev) => ({ ...prev, raast: e.target.value as RaastFailureScenario }))
+              }
+              style={{ width: "100%", padding: 10, border: "1px solid #d9cdbf", borderRadius: 6, fontSize: 12, background: "#fff" }}
+            >
+              <option value="normal">Normal</option>
+              <option value="mismatch">Account Mismatch</option>
+              <option value="timeout">Timeout</option>
+            </select>
+            <small style={{ color: "#806b5e", fontSize: 10, display: "block", marginTop: 4 }}>
+              Simulates /api/mock/raast/pay disbursement response upon officer adjudication.
+            </small>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 18, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={handleApplyFailures}
+          >
+            Apply Settings
+          </button>
+          {(failureScenarios.nadra !== "normal" || failureScenarios.raast !== "normal") && (
+            <button
+              type="button"
+              className="outline-button"
+              onClick={() => {
+                const reset = { nadra: "normal" as const, raast: "normal" as const };
+                setFailureScenarios(reset);
+                saveDemoFailureScenarios(reset);
+                setFailureNotice("Settings reset to Normal.");
+                setTimeout(() => setFailureNotice(""), 3500);
+              }}
+            >
+              Reset to Normal
+            </button>
+          )}
+          {failureNotice && (
+            <span role="status" aria-live="polite" style={{ fontSize: 11, color: "#246132", fontWeight: 600 }}>
+              ✅ {failureNotice}
+            </span>
+          )}
+        </div>
+      </section>
+
       {/* Synthetic User Switcher for Judges */}
       <section className="panel" style={{ marginTop: 20, padding: 20 }}>
         <PanelHeader title="Judges Demo Account Switcher" />
@@ -1668,6 +1859,9 @@ function AuditorHome() {
               <strong>{evt.title}</strong>
               <small>
                 {evt.actor} ({evt.actorRole}) · {evt.details}
+              </small>
+              <small style={{ color: "#775038", fontWeight: 600, display: "block", marginTop: 2 }}>
+                Policy: {evt.ruleVersion ? `v${evt.ruleVersion}` : "—"} · Model: {evt.modelVersion || "—"}
               </small>
             </span>
             <code style={{ fontSize: 9, color: "#99765b" }}>
@@ -1815,11 +2009,17 @@ function Cases({ detail = false }: { detail?: boolean }) {
                               : "dot dot--green"
                           }
                         />
-                        {c.score} confidence ({c.aiRoute})
+                        {user?.role === "CITIZEN" || user?.role === "HELPER"
+                          ? `${c.score} confidence`
+                          : `${c.score} confidence (${c.aiRoute})`}
                       </span>
                     </td>
                     <td>
-                      <Badge tone={c.tone}>{c.status}</Badge>
+                      <Badge tone={c.tone}>
+                        {user?.role === "CITIZEN" || user?.role === "HELPER"
+                          ? getCitizenFriendlyStatus(c.status, c.backendStatus)
+                          : c.status}
+                      </Badge>
                     </td>
                     <td>{c.date}</td>
                     <td>
@@ -1989,8 +2189,9 @@ function CaseDetail() {
     && (targetCase.backendStatus === "cleared" || targetCase.backendStatus === "human_review");
   const canReview = !canAssign && (user?.role === "OFFICER" || user?.role === "ADMIN")
     && (!isLive || targetCase.backendStatus === "cleared" || targetCase.backendStatus === "human_review");
-  const canResubmit = isLive && (user?.role === "CITIZEN" || user?.role === "HELPER")
-    && (targetCase.backendStatus === "needs_proof" || targetCase.backendStatus === "draft");
+  const [showResubmitScanner, setShowResubmitScanner] = useState(false);
+  const canResubmit = (user?.role === "CITIZEN" || user?.role === "HELPER")
+    && (targetCase.status === "More information" || targetCase.backendStatus === "needs_proof" || targetCase.backendStatus === "draft" || Boolean(targetCase.evidenceRequested));
   const timeline = isLive
     ? liveHistory?.caseId === caseId && liveHistory?.revision === revision ? liveHistory?.items ?? [] : []
     : targetCase.timeline;
@@ -2002,7 +2203,8 @@ function CaseDetail() {
     try {
       await resumeCase(targetCase.id, evidence);
       setEvidence({});
-      setActionNotice("Application submitted for processing.");
+      setShowResubmitScanner(false);
+      setActionNotice("✅ Updated information submitted successfully. An officer will review your documents.");
     } catch (error) {
       setActionNotice(error instanceof Error ? error.message : "Submission failed.");
     } finally {
@@ -2090,7 +2292,11 @@ function CaseDetail() {
               <Icon name="lock" size={13} /> Auditor View Only
             </span>
           )}
-          <Badge tone={targetCase.tone}>{targetCase.status}</Badge>
+          <Badge tone={targetCase.tone}>
+            {user?.role === "CITIZEN" || user?.role === "HELPER"
+              ? getCitizenFriendlyStatus(targetCase.status, targetCase.backendStatus)
+              : targetCase.status}
+          </Badge>
         </div>
       </div>
 
@@ -2197,11 +2403,131 @@ function CaseDetail() {
             )}
           </div>}
           {canResubmit && (
-            <form className="panel" onSubmit={submitEvidence}>
-              <PanelHeader title="Submit supporting documents" />
-              <EvidenceInputs evidence={evidence} onChange={setEvidence} required={targetCase.requiredDocuments} />
-              <button type="submit" className="primary-button" disabled={resubmitting}>
-                {resubmitting ? "Submitting…" : "Submit updated application"}
+            <form className="panel resubmission-panel" onSubmit={submitEvidence} style={{ marginTop: 16 }}>
+              <PanelHeader title="More Information Required" />
+              <p style={{ margin: "0 0 16px", fontSize: 12, color: "#806b5e" }}>
+                An officer reviewed your application and requested updated or clearer supporting documents.
+                Please review the requested items below and submit your updated files.
+              </p>
+
+              {/* Checklist of required documents */}
+              <div className="resubmission-checklist">
+                {((targetCase.requiredDocuments && targetCase.requiredDocuments.length > 0)
+                  ? targetCase.requiredDocuments
+                  : (["identity_proof", "income_proof"] as EvidenceType[])
+                ).map((docType) => {
+                  const friendlyLabel = docType === "identity_proof" ? "Identity proof" : "Income proof";
+                  const isUploaded = Boolean(evidence[docType]);
+                  const isPreviouslyProvided = targetCase.documents?.some((d) => d.type === docType);
+
+                  return (
+                    <div
+                      key={docType}
+                      className={`resubmission-item ${isUploaded ? "resubmission-item--ready" : ""}`}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          marginBottom: 8,
+                        }}
+                      >
+                        <strong style={{ fontSize: 13, color: "#351B13" }}>📋 {friendlyLabel}</strong>
+                        <span
+                          className="resubmission-status-pill"
+                          style={{
+                            background: isUploaded ? "#eaf5ec" : isPreviouslyProvided ? "#eff6ff" : "#fef3c7",
+                            color: isUploaded ? "#246132" : isPreviouslyProvided ? "#1e40af" : "#92400e",
+                            border: `1px solid ${isUploaded ? "#a4d4ad" : isPreviouslyProvided ? "#bfdbfe" : "#fde68a"}`,
+                          }}
+                        >
+                          {isUploaded
+                            ? `✅ Ready to submit: ${evidence[docType]?.name}`
+                            : isPreviouslyProvided
+                            ? "✓ Previously provided on file"
+                            : "⚠️ Pending upload"}
+                        </span>
+                      </div>
+
+                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+                        <label
+                          className="secondary-button"
+                          style={{
+                            cursor: "pointer",
+                            fontSize: 11,
+                            padding: "6px 12px",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 6,
+                          }}
+                        >
+                          <span>Choose file</span>
+                          <input
+                            type="file"
+                            accept="image/*,application/pdf"
+                            capture="environment"
+                            style={{ display: "none" }}
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) setEvidence((prev) => ({ ...prev, [docType]: file }));
+                            }}
+                          />
+                        </label>
+
+                        {docType === "identity_proof" && (
+                          <button
+                            type="button"
+                            className="outline-button"
+                            style={{ fontSize: 11, padding: "6px 12px" }}
+                            onClick={() => setShowResubmitScanner(!showResubmitScanner)}
+                          >
+                            {showResubmitScanner ? "Close AI Scanner" : "📷 Scan Document with AI Preview"}
+                          </button>
+                        )}
+
+                        {evidence[docType] && (
+                          <button
+                            type="button"
+                            className="text-button"
+                            style={{ fontSize: 11, color: "#a63525" }}
+                            onClick={() => {
+                              setEvidence((prev) => {
+                                const next = { ...prev };
+                                delete next[docType];
+                                return next;
+                              });
+                            }}
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+
+                      {docType === "identity_proof" && showResubmitScanner && (
+                        <DocumentScanner
+                          title="Scan Replacement Identity Document"
+                          subtitle="Upload or capture a clear photo of your CNIC to satisfy the officer request."
+                          onUseDetails={(_fields, file) => {
+                            if (file) setEvidence((prev) => ({ ...prev, identity_proof: file }));
+                            setShowResubmitScanner(false);
+                          }}
+                          onEnterManually={() => setShowResubmitScanner(false)}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <button
+                type="submit"
+                className="primary-button"
+                disabled={resubmitting || Object.keys(evidence).length === 0}
+                style={{ marginTop: 14 }}
+              >
+                {resubmitting ? "Submitting…" : "Submit Updated Information"}
+                <Icon name="arrow" size={15} />
               </button>
             </form>
           )}
@@ -2258,6 +2584,14 @@ function CaseDetail() {
 
         {/* Decision Rail & Officer Actions */}
         <aside className="decision-rail">
+          {/* Officer/Staff Compact Badge: Requirement 7 */}
+          {user?.role !== "CITIZEN" && user?.role !== "HELPER" && (
+            <div className="policy-model-card" role="note">
+              Policy applied: v{trace?.rule ?? targetCase.ruleVersion ?? 1} · Model{" "}
+              {trace?.model ?? targetCase.modelVersion ?? "—"}
+            </div>
+          )}
+
           <div className="decision-summary">
             <p>AUTOMATED DECISION ASSISTANCE</p>
             <div className="decision-score">
@@ -2266,12 +2600,25 @@ function CaseDetail() {
                 %<small>confidence</small>
               </span>
             </div>
-            <Badge tone={targetCase.tone}>Route: {targetCase.aiRoute}</Badge>
-            <h3>
-              {currentLang === "ur" && targetCase.aiReasonUr
-                ? <span lang="ur" dir="rtl">{targetCase.aiReasonUr}</span>
-                : targetCase.aiReason}
-            </h3>
+            {user?.role === "CITIZEN" || user?.role === "HELPER" ? (
+              <Badge tone={targetCase.tone}>
+                {getCitizenFriendlyStatus(targetCase.status, targetCase.backendStatus)}
+              </Badge>
+            ) : (
+              <Badge tone={targetCase.tone}>Route: {targetCase.aiRoute}</Badge>
+            )}
+
+            {user?.role === "CITIZEN" || user?.role === "HELPER" ? (
+              <p style={{ fontWeight: 600, fontSize: 13, lineHeight: 1.5, margin: "10px 0" }}>
+                {getCitizenOutcomeMessage(targetCase.status, targetCase.aiRoute, targetCase.backendStatus)}
+              </p>
+            ) : (
+              <h3>
+                {currentLang === "ur" && targetCase.aiReasonUr
+                  ? <span lang="ur" dir="rtl">{targetCase.aiReasonUr}</span>
+                  : targetCase.aiReason}
+              </h3>
+            )}
             <p>
               Automated routing suggestions do not disburse public funds without
               authorized officer review.
@@ -2539,7 +2886,6 @@ function ClaimForm() {
   );
 
   const isLive = user?.source === "api";
-  const idempotency = useRef<{ draft: string; key: string }>();
   const [paymentAccount, setPaymentAccount] = useState("");
   const [claimEvidence, setClaimEvidence] = useState<Partial<Record<EvidenceType, File>>>({});
   const [step, setStep] = useState(1);
@@ -2552,6 +2898,7 @@ function ClaimForm() {
       ? helperCitizen?.cnic || "99999-0000001-1"
       : user?.cnic || "99999-0000001-1"
   );
+  const [dob, setDob] = useState("1988-06-14");
   const [phone, setPhone] = useState(
     isLive ? "" : isHelper
       ? helperCitizen?.phone || "0300-0000001"
@@ -2574,9 +2921,105 @@ function ClaimForm() {
     backendNadra: boolean;
   } | null>(null);
 
+  const [isOnline, setIsOnline] = useState(
+    typeof navigator !== "undefined" ? navigator.onLine : true
+  );
+  const [showScanner, setShowScanner] = useState(true);
+
+  // Online / offline event listeners
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  // Restore saved draft on mount
+  useEffect(() => {
+    const saved = loadClaimDraft();
+    if (saved) {
+      if (saved.purpose) setPurpose(saved.purpose);
+      if (saved.income) setIncome(saved.income);
+      if (saved.members) setMembers(saved.members);
+      if (saved.personName) setPersonName(saved.personName);
+      if (saved.cnic) setCnic(saved.cnic);
+      if (saved.phone) setPhone(saved.phone);
+      if (saved.address) setAddress(saved.address);
+      if (saved.householdDesc) setHouseholdDesc(saved.householdDesc);
+      if (saved.paymentAccount) setPaymentAccount(saved.paymentAccount);
+      if (saved.step && saved.step >= 1 && saved.step <= 3) setStep(saved.step);
+    }
+  }, []);
+
+  // Auto-save claim draft whenever fields change
+  useEffect(() => {
+    if (result) return;
+    saveClaimDraft({
+      userId: user?.id,
+      helperActiveCitizen,
+      purpose,
+      income,
+      members,
+      personName,
+      cnic,
+      phone,
+      address,
+      householdDesc,
+      paymentAccount,
+      step,
+    });
+  }, [
+    user?.id,
+    helperActiveCitizen,
+    purpose,
+    income,
+    members,
+    personName,
+    cnic,
+    phone,
+    address,
+    householdDesc,
+    paymentAccount,
+    step,
+    result,
+  ]);
+
+  const draftFingerprint = computeDraftFingerprint({
+    userId: user?.id,
+    helperActiveCitizen,
+    purpose,
+    income,
+    members,
+    personName,
+    cnic,
+    phone,
+    address,
+    householdDesc,
+    paymentAccount,
+    step,
+  });
+
+  const saveStateLabel = !isOnline
+    ? "⚠️ No connection — draft saved. Will retry when online."
+    : submitting
+    ? "Syncing with server…"
+    : result
+    ? "✅ Submitted successfully"
+    : "Draft saved locally";
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitting) return;
+
+    if (!isOnline) {
+      setError("⚠️ No connection — draft saved. Will retry when online.");
+      return;
+    }
+
     if (!consent) {
       setError("Please confirm citizen consent agreement before proceeding.");
       return;
@@ -2585,10 +3028,7 @@ function ClaimForm() {
     setSubmitting(true);
 
     try {
-      const draft = JSON.stringify([user?.id, helperActiveCitizen, personName, cnic, phone, income, members, paymentAccount]);
-      if (idempotency.current?.draft !== draft) {
-        idempotency.current = { draft, key: crypto.randomUUID() };
-      }
+      const idempotencyKey = getOrGenerateIdempotencyKey(draftFingerprint);
       const res = await createCase({
         person: personName,
         cnic,
@@ -2597,7 +3037,7 @@ function ClaimForm() {
         householdIncome: Number(income),
         householdMembers: Number(members),
         paymentAccount,
-        idempotencyKey: idempotency.current.key,
+        idempotencyKey,
         evidence: claimEvidence,
         address,
         notes: householdDesc,
@@ -2607,6 +3047,8 @@ function ClaimForm() {
         submittedByRole: user?.role || "CITIZEN",
       });
       setResult(res);
+      clearIdempotencyKey();
+      clearClaimDraft();
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : "Could not complete submission.");
     } finally {
@@ -2682,6 +3124,21 @@ function ClaimForm() {
             </div>
           ) : (
             <form onSubmit={handleSubmit}>
+              <div
+                role="status"
+                aria-live="polite"
+                className={`save-state-badge ${
+                  !isOnline
+                    ? "save-state-badge--offline"
+                    : submitting
+                    ? "save-state-badge--syncing"
+                    : "save-state-badge--saved"
+                }`}
+                style={{ marginBottom: 14 }}
+              >
+                {saveStateLabel}
+              </div>
+
               <div className="wizard-steps">
                 <div
                   className={`wizard-step ${step >= 1 ? "wizard-step--active" : ""}`}
@@ -2744,6 +3201,55 @@ function ClaimForm() {
               {step === 2 && (
                 <>
                   <PanelHeader title="Step 2: Identity & Location" />
+
+                  {/* Document scan experience immediately after basic details */}
+                  {showScanner ? (
+                    <DocumentScanner
+                      title="Scan CNIC / Identity Document"
+                      subtitle="Upload or photograph your CNIC to automatically extract and preview your details."
+                      onUseDetails={(fields, file) => {
+                        if (fields.name) setPersonName(fields.name);
+                        if (fields.cnic) setCnic(fields.cnic);
+                        if (fields.dob) setDob(fields.dob);
+                        if (file) {
+                          setClaimEvidence((prev) => ({ ...prev, identity_proof: file }));
+                        }
+                        setShowScanner(false);
+                      }}
+                      onEnterManually={() => setShowScanner(false)}
+                      initialValues={{ name: personName, cnic, dob }}
+                    />
+                  ) : (
+                    <div
+                      style={{
+                        marginBottom: 12,
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        flexWrap: "wrap",
+                        gap: 8,
+                        background: "#fbf6ef",
+                        padding: "8px 12px",
+                        borderRadius: 6,
+                        border: "1px solid #ebd9c6",
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className="outline-button"
+                        style={{ fontSize: 11, padding: "5px 10px" }}
+                        onClick={() => setShowScanner(true)}
+                      >
+                        📷 Scan CNIC with AI Preview
+                      </button>
+                      {claimEvidence.identity_proof && (
+                        <span style={{ fontSize: 11, color: "#246132", fontWeight: 600 }}>
+                          ✓ Attached: {claimEvidence.identity_proof.name}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   <label>
                     Citizen Full Name
                     <input
@@ -2759,6 +3265,14 @@ function ClaimForm() {
                       onChange={(e) => setCnic(e.target.value)}
                       placeholder={isLive ? "MOCK-123456" : "e.g. 99999-0000001-1"}
                       required
+                    />
+                  </label>
+                  <label>
+                    Date of Birth (DOB)
+                    <input
+                      value={dob}
+                      onChange={(e) => setDob(e.target.value)}
+                      placeholder="YYYY-MM-DD"
                     />
                   </label>
                   <label>
@@ -3529,6 +4043,9 @@ function Audit() {
                 · Actor: {item.actor} ({item.actorRole})
               </small>
               <small style={{ color: "#776355" }}>{item.details}</small>
+              <small style={{ color: "#775038", fontWeight: 600, display: "block", marginTop: 2 }}>
+                Rule: {item.ruleVersion ? `v${item.ruleVersion}` : "—"} · Model: {item.modelVersion || "—"}
+              </small>
             </span>
             <button
               type="button"
@@ -3568,6 +4085,16 @@ function Audit() {
                   value={`${selectedEvent.actor} (${selectedEvent.actorRole})`}
                 />
               </label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 4 }}>
+                <label>
+                  Rule Version:
+                  <input readOnly value={selectedEvent.ruleVersion ? `v${selectedEvent.ruleVersion}` : "—"} />
+                </label>
+                <label>
+                  Model Version:
+                  <input readOnly value={selectedEvent.modelVersion || "—"} />
+                </label>
+              </div>
             </div>
             <div className="modal-footer">
               <button
