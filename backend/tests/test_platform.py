@@ -1,4 +1,5 @@
 # OWNER: Member 1
+import os
 import uuid
 import pytest
 from fastapi import Request
@@ -10,6 +11,14 @@ from rasta_platform.services import factory, actor
 
 client = TestClient(main.app)
 
+# These tests read AND WRITE the database in DATABASE_URL (they revoke the
+# helper's consent and may insert an approved case). Run them only against a
+# disposable database:  RASTA_DB_TESTS=1 pytest tests/test_platform.py
+writes_db = pytest.mark.skipif(
+    os.getenv("RASTA_DB_TESTS") != "1",
+    reason="mutates the configured database; set RASTA_DB_TESTS=1 to run",
+)
+
 
 def test_health():
     response = client.get("/api/platform/health")
@@ -17,6 +26,7 @@ def test_health():
     assert response.json()["service"] == "platform"
 
 
+@writes_db
 def test_admin_user_management():
     with factory()() as session:
         admin = session.query(User).filter_by(role="admin").first()
@@ -52,6 +62,7 @@ def test_admin_user_management():
     main.app.dependency_overrides.clear()
 
 
+@writes_db
 def test_unauthorized_user_access_blocked():
     with factory()() as session:
         citizen_user = session.query(User).filter_by(role="citizen").first()
@@ -69,6 +80,7 @@ def test_unauthorized_user_access_blocked():
     main.app.dependency_overrides.clear()
 
 
+@writes_db
 def test_helper_consent_revocation_denial():
     with factory()() as session:
         helper = session.query(User).filter_by(role="helper").first()
@@ -110,6 +122,7 @@ def test_helper_consent_revocation_denial():
     main.app.dependency_overrides.clear()
 
 
+@writes_db
 def test_officer_review_terminal_idempotency_guard():
     with factory()() as session:
         officer = session.query(User).filter_by(role="officer").first()
@@ -155,6 +168,7 @@ def test_officer_review_terminal_idempotency_guard():
     main.app.dependency_overrides.clear()
 
 
+@writes_db
 def test_auditor_decision_trace_enriched():
     with factory()() as session:
         auditor = session.query(User).filter_by(role="auditor").first()

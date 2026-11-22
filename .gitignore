@@ -12,6 +12,10 @@ dist/
 # Secrets
 .env
 
+# User-uploaded proof documents (runtime data)
+uploads/
+backend/uploads/
+
 # Editors / OS
 .vscode/
 .idea/
