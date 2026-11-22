@@ -35,6 +35,7 @@ export interface CaseRecord {
   id: string;
   person: string;
   cnic: string;
+  dob?: string;
   phone: string;
   type: string;
   householdIncome: number;
@@ -53,6 +54,8 @@ export interface CaseRecord {
   aiReason: string;
   aiReasonUr?: string;
   aiConfidence: number;
+  ruleVersion?: number;
+  modelVersion?: string | null;
   nadraVerified?: boolean;
   nadraNote?: string;
   evidenceRequested?: boolean;
@@ -85,6 +88,8 @@ export interface AuditEvent {
   details: string;
   hash: string;
   source: "api" | "local_ledger";
+  ruleVersion?: number | string;
+  modelVersion?: string | null;
 }
 
 export interface PolicyRule {

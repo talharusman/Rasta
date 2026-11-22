@@ -1,5 +1,5 @@
 // Central state store for RASTA with local persistence and real backend integration
-import React, { createContext, useContext, useEffect, useState } from "react";
+import React, { createContext, useContext, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   assignBackendOfficer,
@@ -161,6 +161,9 @@ const initialCases: CaseRecord[] = [
     aiRoute: "HUMAN",
     aiReason: "Duplicate household address flag detected with historical record REL-18214.",
     aiConfidence: 0.62,
+    ruleVersion: 1,
+    modelVersion: "fast-relief-v2",
+    requiredDocuments: ["identity_proof", "income_proof"],
     nadraVerified: true,
     nadraNote: "FAKE NADRA: Record matches identity registry.",
     timeline: [
@@ -207,6 +210,8 @@ const initialCases: CaseRecord[] = [
     aiRoute: "AUTO_CLEAR",
     aiReason: "Identity verified, income below Rs 45,000 threshold, no duplicates.",
     aiConfidence: 0.94,
+    ruleVersion: 1,
+    modelVersion: "fast-relief-v1",
     nadraVerified: true,
     timeline: [
       {
@@ -252,6 +257,9 @@ const initialCases: CaseRecord[] = [
     aiRoute: "HUMAN",
     aiReason: "Document scan low-resolution; utility bill date unreadable.",
     aiConfidence: 0.45,
+    ruleVersion: 1,
+    modelVersion: "fast-relief-v1",
+    requiredDocuments: ["identity_proof", "income_proof"],
     evidenceRequested: true,
     evidenceNotes: ["Officer requested updated electricity bill scan."],
     timeline: [
@@ -291,6 +299,8 @@ const initialCases: CaseRecord[] = [
     aiRoute: "HUMAN",
     aiReason: "Income threshold satisfied. Awaiting officer queue confirmation.",
     aiConfidence: 0.88,
+    ruleVersion: 1,
+    modelVersion: "fast-relief-v1",
     timeline: [
       {
         id: "t9",
@@ -321,6 +331,8 @@ const initialCases: CaseRecord[] = [
     aiRoute: "AUTO_CLEAR",
     aiReason: "High confidence identity & poverty scorecard verified.",
     aiConfidence: 0.97,
+    ruleVersion: 1,
+    modelVersion: "fast-relief-v1",
     paymentTxnId: "FAKE-TXN-0001",
     paymentAmount: 25000,
     timeline: [
@@ -382,6 +394,8 @@ const initialAudit: AuditEvent[] = [
     details: "Case REL-20481 routed to HUMAN review queue due to duplicate address score (0.62).",
     hash: "sha256:7e88c0a25691d57e4e13",
     source: "api",
+    ruleVersion: 1,
+    modelVersion: "fast-relief-v2",
   },
   {
     id: "aud-002",
@@ -797,6 +811,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       aiReason: row.user_explanation ?? "Automated assessment pending.",
       aiReasonUr: row.user_explanation_ur ?? undefined,
       aiConfidence: confidence ?? 0, nadraVerified: row.decision?.identity_verified,
+      ruleVersion: row.decision?.rule_version, modelVersion: row.decision?.model_version,
       timeline: [], backendStatus: row.status, backendRevision: row.revision,
       requiredDocuments: row.required_documents, documents: row.documents, assignedOfficerId: row.assigned_officer_id,
       paymentStatus: row.payment?.status, paymentTxnId: row.payment?.transaction_id ?? undefined,
@@ -837,6 +852,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   };
 
   const getCase = (id: string) => cases.find((c) => c.id === id);
+  const demoSubmittedKeys = useRef<Map<string, { caseId: string; backendAi: boolean; backendNadra: boolean }>>(new Map());
 
   const createCase = async (payload: {
     person: string;
@@ -883,6 +899,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       refreshLive();
       return { caseId: created.case_id, backendAi: false, backendNadra: false };
     }
+    if (!liveActor && payload.idempotencyKey && demoSubmittedKeys.current.has(payload.idempotencyKey)) {
+      return demoSubmittedKeys.current.get(payload.idempotencyKey)!;
+    }
+
     let aiRoute = "HUMAN";
     let aiReason = "Automated escalation";
     let aiConfidence = 0.65;
@@ -937,6 +957,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       aiRoute,
       aiReason,
       aiConfidence,
+      ruleVersion: 1,
+      modelVersion: "fast-relief-v2",
+      requiredDocuments: ["identity_proof", "income_proof"],
       nadraVerified,
       nadraNote,
       timeline: [
@@ -990,7 +1013,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       ...prev,
     ]);
 
-    return { caseId: nextId, backendAi, backendNadra };
+    const outcome = { caseId: nextId, backendAi, backendNadra };
+    if (payload.idempotencyKey) {
+      demoSubmittedKeys.current.set(payload.idempotencyKey, outcome);
+    }
+    return outcome;
   };
 
   async function uploadAndSubmit(current: BackendCase, evidence: Partial<Record<EvidenceType, File>>) {
@@ -1013,8 +1040,53 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   }
 
   async function resumeCase(caseId: string, evidence: Partial<Record<EvidenceType, File>>) {
-    await uploadAndSubmit(await fetchBackendCaseDetail(caseId), evidence);
-    refreshLive();
+    if (liveActor) {
+      await uploadAndSubmit(await fetchBackendCaseDetail(caseId), evidence);
+      refreshLive();
+    } else {
+      const nowTime = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const uploadedTypes = Object.keys(evidence) as EvidenceType[];
+      setCases((prev) =>
+        prev.map((c) => {
+          if (c.id !== caseId) return c;
+          const newDocs = uploadedTypes.map((type, idx) => ({
+            id: `doc-${Date.now()}-${idx}`,
+            type,
+            content_type: evidence[type]?.type || "image/jpeg",
+            sha256: `demo-sha256-${Date.now()}-${idx}`,
+          }));
+          return {
+            ...c,
+            status: "Processing" as const,
+            tone: "neutral" as const,
+            evidenceRequested: false,
+            documents: [...(c.documents || []), ...newDocs],
+            timeline: [
+              {
+                id: `t-${Date.now()}-resub`,
+                title: "Updated Information Submitted",
+                time: nowTime,
+                description: `Citizen submitted updated documents: ${uploadedTypes.map((t) => t.replace(/_/g, " ")).join(", ") || "Supporting files"}. Pending officer review.`,
+                type: "evidence" as const,
+              },
+              ...c.timeline,
+            ],
+          };
+        })
+      );
+      setNotifications((prev) => [
+        {
+          id: `notif-${Date.now()}`,
+          title: "Documents Resubmitted",
+          message: `Updated evidence received for ${caseId}. Pending officer review.`,
+          caseId,
+          time: "Just now",
+          read: false,
+          type: "info",
+        },
+        ...prev,
+      ]);
+    }
   }
 
   const officerAction = async (
@@ -1148,6 +1220,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
             status: "More information",
             tone: "muted",
             evidenceRequested: true,
+            requiredDocuments: c.requiredDocuments && c.requiredDocuments.length > 0
+              ? c.requiredDocuments
+              : ["identity_proof", "income_proof"],
             evidenceNotes: [...(c.evidenceNotes || []), notes],
             timeline: [
               {
