@@ -159,7 +159,7 @@ async def run_assistance(case_id, generation):
             result['requests'].append({'task': kind, **meta})
             if fields is None:
                 continue
-            claim = snapshot['claim']
+            claim = {**snapshot['claim'], 'date_of_birth': snapshot['claim'].get('dob')}
             conflicts = [
                 key for key, value in fields.items()
                 if value is not None and claim.get(key) is not None

@@ -25,6 +25,9 @@ import {
   type ScamAssessment,
   verifyNadra,
   getDemoFailureScenarios,
+  getLiveMockConditions,
+  setLiveMockConditions,
+  type LiveMockConditions,
   saveDemoFailureScenarios,
   type NadraFailureScenario,
   type RaastFailureScenario,
@@ -41,7 +44,6 @@ import {
 import {
   computeDraftFingerprint,
   getOrGenerateIdempotencyKey,
-  clearIdempotencyKey,
   saveClaimDraft,
   loadClaimDraft,
   clearClaimDraft,
@@ -953,9 +955,9 @@ function CitizenHome() {
               </div>
               <div
                 className={`tracker-node ${
-                  latestCase.status === "Verified"
+                  latestCase.backendStatus === "approved" || latestCase.paymentTxnId
                     ? "tracker-node--done"
-                    : latestCase.status === "Needs review"
+                    : ["Needs review", "Checks passed"].includes(latestCase.status)
                     ? "tracker-node--current"
                     : ""
                 }`}
@@ -972,7 +974,10 @@ function CitizenHome() {
             </div>
 
             <p style={{ marginTop: 12, fontWeight: 500, lineHeight: 1.5 }}>
-              {getCitizenOutcomeMessage(latestCase.status, latestCase.aiRoute, latestCase.backendStatus)}
+              {currentLang === "ur" && latestCase.aiReasonUr && ["cleared", "needs_proof", "human_review"].includes(latestCase.backendStatus ?? "")
+                ? <span lang="ur" dir="rtl">{latestCase.aiReasonUr}</span>
+                : getCitizenOutcomeMessage(latestCase.status, latestCase.aiRoute, latestCase.backendStatus)}
+              {(latestCase.paymentStatus || latestCase.paymentTxnId) && <small> {paymentText(latestCase)}</small>}
             </p>
 
             <Link to={`/cases/${latestCase.id}`} className="explain-link">
@@ -1510,8 +1515,65 @@ function Overview() {
 // ==========================================
 // 4. ADMIN ROLE VIEW
 // ==========================================
+const liveFailures = [
+  ["nadra_timeout", "NADRA timeout"], ["nadra_outage", "NADRA outage"],
+  ["identity_mismatch", "NADRA name mismatch"], ["duplicated_response", "Duplicate registry record"],
+  ["malformed_response", "Malformed registry response"], ["raast_outage", "Raast unavailable"],
+  ["sms_failure", "SMS delivery failure"],
+] as const satisfies ReadonlyArray<readonly [keyof LiveMockConditions, string]>;
+
+function LiveFailureControls() {
+  const [conditions, setConditions] = useState<LiveMockConditions>();
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getLiveMockConditions()
+      .then((value) => { if (!cancelled) setConditions(value); })
+      .catch((error: Error) => { if (!cancelled) setMessage(error.message); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const apply = async (reset = false) => {
+    if (!conditions || busy) return;
+    setBusy(true);
+    setMessage("");
+    const values = Object.fromEntries(liveFailures.map(([key]) => [key, reset ? false : conditions[key]]));
+    try {
+      setConditions(await setLiveMockConditions(values));
+      setMessage(reset ? "Mock providers reset." : "Mock provider settings applied.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not apply mock provider settings.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="panel admin-failure-card">
+      <PanelHeader title="Mock provider scenarios" />
+      <p>Changes apply to the shared demo worker and mock services.</p>
+      {conditions && (
+        <>
+          {liveFailures.map(([key, label]) => (
+            <label className="consent-check" key={key}>
+              <input type="checkbox" checked={conditions[key]} disabled={busy}
+                onChange={(event) => setConditions({ ...conditions, [key]: event.target.checked })} />
+              {label}
+            </label>
+          ))}
+          <button type="button" className="primary-button" disabled={busy} onClick={() => apply()}>Apply Settings</button>
+          <button type="button" className="outline-button" disabled={busy} onClick={() => apply(true)}>Reset</button>
+        </>
+      )}
+      {message && <p role="status">{message}</p>}
+    </section>
+  );
+}
+
 function AdminHome() {
-  const { switchRole } = useAuth();
+  const { user, switchRole } = useAuth();
   const { cases, auditEvents, settings, updateSetting } = useData();
   const [health, setHealth] = useState<{
     platform: { connected: boolean; status: string };
@@ -1653,7 +1715,7 @@ function AdminHome() {
       </section>
 
       {/* Demo Failure Scenarios (Mock Failure Controls) */}
-      <section className="panel admin-failure-card">
+      {user?.source === "api" ? <LiveFailureControls /> : <section className="panel admin-failure-card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
           <PanelHeader title="Demo Failure Scenarios" />
           <span className="api-badge api-badge--demo">Frontend Demo Configuration</span>
@@ -1739,7 +1801,7 @@ function AdminHome() {
             </span>
           )}
         </div>
-      </section>
+      </section>}
 
       {/* Synthetic User Switcher for Judges */}
       <section className="panel" style={{ marginTop: 20, padding: 20 }}>
@@ -1893,9 +1955,10 @@ function Cases({ detail = false }: { detail?: boolean }) {
   const [filter, setFilter] = useState("All cases");
   const [sortOrder, setSortOrder] = useState<"newest" | "oldest">("newest");
   const [searchParams] = useSearchParams();
+  const { caseId } = useParams();
   const query = (searchParams.get("q") ?? "").toLowerCase();
 
-  if (detail) return <CaseDetail />;
+  if (detail) return <CaseDetail key={JSON.stringify([user?.source, user?.id, caseId])} />;
 
   const filteredCases = cases
     .filter((c) => {
@@ -2130,6 +2193,7 @@ function CaseDetail() {
 
   const [overrideReason, setOverrideReason] = useState("");
   const [resubmitting, setResubmitting] = useState(false);
+  const [showResubmitScanner, setShowResubmitScanner] = useState(false);
   const [evidence, setEvidence] = useState<Partial<Record<EvidenceType, File>>>({});
   const [reviewing, setReviewing] = useState(false);
   const [liveHistory, setLiveHistory] = useState<{ caseId: string; revision: number; items: CaseRecord["timeline"] }>();
@@ -2189,9 +2253,9 @@ function CaseDetail() {
     && (targetCase.backendStatus === "cleared" || targetCase.backendStatus === "human_review");
   const canReview = !canAssign && (user?.role === "OFFICER" || user?.role === "ADMIN")
     && (!isLive || targetCase.backendStatus === "cleared" || targetCase.backendStatus === "human_review");
-  const [showResubmitScanner, setShowResubmitScanner] = useState(false);
   const canResubmit = (user?.role === "CITIZEN" || user?.role === "HELPER")
-    && (targetCase.status === "More information" || targetCase.backendStatus === "needs_proof" || targetCase.backendStatus === "draft" || Boolean(targetCase.evidenceRequested));
+    && (isLive ? targetCase.backendStatus === "needs_proof" || targetCase.backendStatus === "draft"
+      : targetCase.status === "More information");
   const timeline = isLive
     ? liveHistory?.caseId === caseId && liveHistory?.revision === revision ? liveHistory?.items ?? [] : []
     : targetCase.timeline;
@@ -2465,7 +2529,7 @@ function CaseDetail() {
                           <span>Choose file</span>
                           <input
                             type="file"
-                            accept="image/*,application/pdf"
+                            accept="image/jpeg,image/png,application/pdf"
                             capture="environment"
                             style={{ display: "none" }}
                             onChange={(e) => {
@@ -2506,8 +2570,10 @@ function CaseDetail() {
 
                       {docType === "identity_proof" && showResubmitScanner && (
                         <DocumentScanner
-                          title="Scan Replacement Identity Document"
-                          subtitle="Upload or capture a clear photo of your CNIC to satisfy the officer request."
+                          live={isLive}
+                          citizenId={targetCase.citizenId}
+                          title="Preview replacement identity photo"
+                          subtitle="Attach a clearer synthetic identity photo for this claim."
                           onUseDetails={(_fields, file) => {
                             if (file) setEvidence((prev) => ({ ...prev, identity_proof: file }));
                             setShowResubmitScanner(false);
@@ -2523,7 +2589,7 @@ function CaseDetail() {
               <button
                 type="submit"
                 className="primary-button"
-                disabled={resubmitting || Object.keys(evidence).length === 0}
+                disabled={resubmitting || (targetCase.backendStatus !== "draft" && Object.keys(evidence).length === 0)}
                 style={{ marginTop: 14 }}
               >
                 {resubmitting ? "Submitting…" : "Submit Updated Information"}
@@ -2587,7 +2653,7 @@ function CaseDetail() {
           {/* Officer/Staff Compact Badge: Requirement 7 */}
           {user?.role !== "CITIZEN" && user?.role !== "HELPER" && (
             <div className="policy-model-card" role="note">
-              Policy applied: v{trace?.rule ?? targetCase.ruleVersion ?? 1} · Model{" "}
+              Policy applied: {trace?.rule || targetCase.ruleVersion ? `v${trace?.rule ?? targetCase.ruleVersion}` : "—"} · Model{" "}
               {trace?.model ?? targetCase.modelVersion ?? "—"}
             </div>
           )}
@@ -2610,7 +2676,9 @@ function CaseDetail() {
 
             {user?.role === "CITIZEN" || user?.role === "HELPER" ? (
               <p style={{ fontWeight: 600, fontSize: 13, lineHeight: 1.5, margin: "10px 0" }}>
-                {getCitizenOutcomeMessage(targetCase.status, targetCase.aiRoute, targetCase.backendStatus)}
+                {currentLang === "ur" && targetCase.aiReasonUr && ["cleared", "needs_proof", "human_review"].includes(targetCase.backendStatus ?? "")
+                  ? <span lang="ur" dir="rtl">{targetCase.aiReasonUr}</span>
+                  : getCitizenOutcomeMessage(targetCase.status, targetCase.aiRoute, targetCase.backendStatus)}
               </p>
             ) : (
               <h3>
@@ -2871,6 +2939,15 @@ function CaseDetail() {
 // ==========================================
 function ClaimForm() {
   const { user } = useAuth();
+  const { helperActiveCitizen, authorizedCitizens } = useData();
+  const active = user?.role === "HELPER"
+    ? authorizedCitizens.find((citizen) => citizen.name === helperActiveCitizen) : undefined;
+  const scope = JSON.stringify([user?.source, user?.id, active?.id ?? active?.name ?? null]);
+  return <ClaimFormDraft key={scope} scope={scope} />;
+}
+
+function ClaimFormDraft({ scope }: { scope: string }) {
+  const { user } = useAuth();
   const navigate = useNavigate();
   const {
     createCase,
@@ -2898,7 +2975,7 @@ function ClaimForm() {
       ? helperCitizen?.cnic || "99999-0000001-1"
       : user?.cnic || "99999-0000001-1"
   );
-  const [dob, setDob] = useState("1988-06-14");
+  const [dob, setDob] = useState("");
   const [phone, setPhone] = useState(
     isLive ? "" : isHelper
       ? helperCitizen?.phone || "0300-0000001"
@@ -2938,85 +3015,51 @@ function ClaimForm() {
     };
   }, []);
 
-  // Restore saved draft on mount
-  useEffect(() => {
-    const saved = loadClaimDraft();
-    if (saved) {
-      if (saved.purpose) setPurpose(saved.purpose);
-      if (saved.income) setIncome(saved.income);
-      if (saved.members) setMembers(saved.members);
-      if (saved.personName) setPersonName(saved.personName);
-      if (saved.cnic) setCnic(saved.cnic);
-      if (saved.phone) setPhone(saved.phone);
-      if (saved.address) setAddress(saved.address);
-      if (saved.householdDesc) setHouseholdDesc(saved.householdDesc);
-      if (saved.paymentAccount) setPaymentAccount(saved.paymentAccount);
-      if (saved.step && saved.step >= 1 && saved.step <= 3) setStep(saved.step);
-    }
-  }, []);
+  const [draftReady, setDraftReady] = useState(false);
+  const [draftSaved, setDraftSaved] = useState(false);
+  const submitInFlight = useRef(false);
+  const retry = useRef<{ fingerprint: string; key: string }>();
 
-  // Auto-save claim draft whenever fields change
   useEffect(() => {
-    if (result) return;
-    saveClaimDraft({
-      userId: user?.id,
-      helperActiveCitizen,
-      purpose,
-      income,
-      members,
-      personName,
-      cnic,
-      phone,
-      address,
-      householdDesc,
-      paymentAccount,
-      step,
-    });
-  }, [
-    user?.id,
-    helperActiveCitizen,
-    purpose,
-    income,
-    members,
-    personName,
-    cnic,
-    phone,
-    address,
-    householdDesc,
-    paymentAccount,
-    step,
-    result,
-  ]);
+    const saved = loadClaimDraft(scope);
+    if (saved) {
+      if (saved.purpose != null) setPurpose(saved.purpose);
+      if (saved.income != null) setIncome(saved.income);
+      if (saved.members != null) setMembers(saved.members);
+      if (saved.personName != null) setPersonName(saved.personName);
+      if (saved.cnic != null) setCnic(saved.cnic);
+      if (saved.dob != null) setDob(saved.dob);
+      if (saved.phone != null) setPhone(saved.phone);
+      if (saved.address != null) setAddress(saved.address);
+      if (saved.householdDesc != null) setHouseholdDesc(saved.householdDesc);
+      if (saved.paymentAccount != null) setPaymentAccount(saved.paymentAccount);
+      setStep(saved.step ?? 1);
+    }
+    setDraftReady(true);
+  }, [scope]);
+
+  useEffect(() => {
+    if (!draftReady || result) return;
+    setDraftSaved(saveClaimDraft(scope, {
+      purpose, income, members, personName, cnic, dob, phone, address, householdDesc, paymentAccount, step,
+    }));
+  }, [scope, draftReady, purpose, income, members, personName, cnic, dob, phone, address,
+    householdDesc, paymentAccount, step, result]);
 
   const draftFingerprint = computeDraftFingerprint({
-    userId: user?.id,
-    helperActiveCitizen,
-    purpose,
-    income,
-    members,
-    personName,
-    cnic,
-    phone,
-    address,
-    householdDesc,
-    paymentAccount,
-    step,
+    purpose, income, members, personName, cnic, dob, phone, address, householdDesc, paymentAccount, step,
   });
-
-  const saveStateLabel = !isOnline
-    ? "⚠️ No connection — draft saved. Will retry when online."
-    : submitting
-    ? "Syncing with server…"
-    : result
-    ? "✅ Submitted successfully"
-    : "Draft saved locally";
+  const saveStateLabel = result ? (isLive ? "Submitted successfully" : "Saved in browser demo")
+    : submitting ? "Submitting…"
+    : !isOnline && isLive ? (draftSaved ? "Offline · Draft saved locally" : "Offline")
+    : draftSaved ? "Draft saved locally" : "Draft";
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (submitting) return;
+    if (submitInFlight.current) return;
 
-    if (!isOnline) {
-      setError("⚠️ No connection — draft saved. Will retry when online.");
+    if (!isOnline && isLive) {
+      setError("Reconnect, then select Submit Official Claim to try again.");
       return;
     }
 
@@ -3025,13 +3068,18 @@ function ClaimForm() {
       return;
     }
     setError("");
+    submitInFlight.current = true;
     setSubmitting(true);
 
     try {
-      const idempotencyKey = getOrGenerateIdempotencyKey(draftFingerprint);
+      if (retry.current?.fingerprint !== draftFingerprint) {
+        retry.current = { fingerprint: draftFingerprint, key: getOrGenerateIdempotencyKey(scope, draftFingerprint) };
+      }
+      const idempotencyKey = retry.current.key;
       const res = await createCase({
         person: personName,
         cnic,
+        dob: dob || undefined,
         phone,
         type: purpose,
         householdIncome: Number(income),
@@ -3047,11 +3095,11 @@ function ClaimForm() {
         submittedByRole: user?.role || "CITIZEN",
       });
       setResult(res);
-      clearIdempotencyKey();
-      clearClaimDraft();
+      clearClaimDraft(scope);
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : "Could not complete submission.");
     } finally {
+      submitInFlight.current = false;
       setSubmitting(false);
     }
   };
@@ -3205,8 +3253,8 @@ function ClaimForm() {
                   {/* Document scan experience immediately after basic details */}
                   {showScanner ? (
                     <DocumentScanner
-                      title="Scan CNIC / Identity Document"
-                      subtitle="Upload or photograph your CNIC to automatically extract and preview your details."
+                      live={isLive}
+                      citizenId={isHelper ? helperCitizen?.id : user?.citizen_id}
                       onUseDetails={(fields, file) => {
                         if (fields.name) setPersonName(fields.name);
                         if (fields.cnic) setCnic(fields.cnic);
@@ -3240,7 +3288,7 @@ function ClaimForm() {
                         style={{ fontSize: 11, padding: "5px 10px" }}
                         onClick={() => setShowScanner(true)}
                       >
-                        📷 Scan CNIC with AI Preview
+                        Preview an identity photo
                       </button>
                       {claimEvidence.identity_proof && (
                         <span style={{ fontSize: 11, color: "#246132", fontWeight: 600 }}>
@@ -3268,8 +3316,9 @@ function ClaimForm() {
                     />
                   </label>
                   <label>
-                    Date of Birth (DOB)
+                    Date of birth (optional)
                     <input
+                      type="date"
                       value={dob}
                       onChange={(e) => setDob(e.target.value)}
                       placeholder="YYYY-MM-DD"

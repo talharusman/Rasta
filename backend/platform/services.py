@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import uuid
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
@@ -337,6 +338,7 @@ class ClaimData(Input):
     monthly_income: int = Field(ge=0)
     household_size: int = Field(ge=1, le=100)
     payment_account: str = Field(pattern=r'^MOCK-', max_length=100)
+    dob: date | None = None
     citizen_phone: str | None = Field(default=None, pattern=r'^\+920[0-9]{9}$')
 
 

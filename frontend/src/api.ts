@@ -254,6 +254,7 @@ export async function createBackendCase(payload: {
     household_size: number;
     payment_account: string;
     citizen_phone?: string;
+    dob?: string;
   };
 }): Promise<any> {
   return request<BackendCase>("/api/v1/cases", {
@@ -379,6 +380,28 @@ export async function requestAiDecision(): Promise<AiDecisionResponse> {
   });
 }
 
+export type LiveMockConditions = Record<"nadra_timeout" | "nadra_outage" | "identity_mismatch"
+  | "duplicated_response" | "malformed_response" | "raast_outage" | "sms_failure", boolean>;
+
+export const getLiveMockConditions = () => request<LiveMockConditions>("/api/v1/admin/mock-conditions");
+export const setLiveMockConditions = (changes: Partial<LiveMockConditions>) =>
+  request<LiveMockConditions>("/api/v1/admin/mock-conditions", { method: "PUT", body: JSON.stringify(changes) });
+
+export interface DocumentPreview {
+  quality_ok: boolean | null;
+  quality_note: string | null;
+  suggested_action: string;
+  extracted_fields: Record<string, { value: string | null; confidence: number; warning?: string }>;
+}
+
+export function previewIdentityDocument(citizenId: string, file: File, signal: AbortSignal) {
+  const body = new FormData();
+  body.append("citizen_id", citizenId);
+  body.append("file", file);
+  body.append("consent", "true");
+  return request<DocumentPreview>("/api/v1/documents/preview", { method: "POST", body, signal });
+}
+
 export type NadraFailureScenario = "normal" | "timeout" | "not_found" | "name_mismatch";
 export type RaastFailureScenario = "normal" | "mismatch" | "timeout";
 
@@ -483,6 +506,7 @@ export type EvidenceType = "identity_proof" | "income_proof";
 
 export interface BackendCase {
   case_id: string;
+  citizen_id: string;
   status: "draft" | "submitted" | "processing" | "cleared" | "needs_proof" | "human_review" | "approved" | "rejected" | "closed";
   revision: number;
   assigned_officer_id: string | null;
@@ -498,6 +522,7 @@ export interface BackendCase {
     household_size: number;
     payment_account: string;
     citizen_phone?: string | null;
+    dob?: string | null;
   };
   documents: { id: string; type: EvidenceType; content_type: string; sha256: string }[];
   decision?: { route: string; confidence: number | null; identity_verified: boolean; rule_version: number; model_version: string | null };

@@ -36,6 +36,7 @@ export interface CaseRecord {
   person: string;
   cnic: string;
   dob?: string;
+  citizenId?: string;
   phone: string;
   type: string;
   householdIncome: number;
